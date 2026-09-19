@@ -1,5 +1,8 @@
 # git-pile
 
+For Jujutsu, see [jj-pile](docs/jj-pile.md): the same individual-review
+workflow using jj changes, bookmarks, and native editing commands.
+
 `git-pile` is a set of Python scripts for using a stacked-diff[^1] workflow
 with git & GitHub[^2]. There are a lot of different trade-offs for how
 this can work, `git-pile` chooses to be mostly not-magical at the cost

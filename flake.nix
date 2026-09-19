@@ -61,6 +61,39 @@
             };
           };
 
+          jj-pile = pkgs.stdenvNoCC.mkDerivation {
+            pname = "jj-pile";
+            version = "0.0.0";
+            src = ./.;
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            nativeCheckInputs = [ pkgs.python3 pkgs.git pkgs.jujutsu ];
+            doCheck = true;
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out/bin"
+              cp bin/jj-pile "$out/bin/"
+              chmod +x "$out/bin/jj-pile"
+              wrapProgram "$out/bin/jj-pile" --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.python3 pkgs.git pkgs.gh pkgs.jujutsu ]}
+              runHook postInstall
+            '';
+
+            checkPhase = ''
+              runHook preCheck
+              patchShebangs bin
+              python3 -m unittest discover -s tests -v
+              runHook postCheck
+            '';
+
+            meta = with pkgs.lib; {
+              description = "Change-based pull requests for Jujutsu and GitHub";
+              homepage = "https://github.com/keith/git-pile";
+              license = licenses.mit;
+              platforms = platforms.all;
+              mainProgram = "jj-pile";
+            };
+          };
+
           default = self.packages.${system}.git-pile;
         });
     };

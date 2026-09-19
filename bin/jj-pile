@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Publish individual jj changes as GitHub pull requests."""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from urllib.parse import urlsplit
+
+
+def run(*args):
+    return subprocess.run(args, text=True, capture_output=True, check=True).stdout
+
+
+def jj(*args):
+    return run("jj", "--no-pager", "--color=never", *args)
+
+
+def fail(message):
+    raise SystemExit("error: " + message)
+
+
+def changes(revset):
+    template = (
+        'commit_id ++ "\\t" ++ change_id ++ "\\t" ++ conflict ++ "\\t" '
+        '++ empty ++ "\\t" ++ json(description) ++ "\\n"'
+    )
+    result = []
+    for line in jj("log", "--no-graph", "-r", revset, "-T", template).splitlines():
+        commit, change, conflict, empty, description = line.split("\t", 4)
+        result.append(dict(commit=commit, change=change, conflict=conflict == "true",
+                           empty=empty == "true", description=json.loads(description)))
+    return result
+
+
+def one(revset):
+    result = changes(revset)
+    if len(result) != 1:
+        fail(f"expected exactly one revision for {revset!r}, found {len(result)}")
+    return result[0]
+
+
+def bookmark(change):
+    # Full change IDs survive rewrites and description edits without a state file.
+    return "pile/" + change["change"]
+
+
+def remote_ref(name, remote):
+    return f"remote_bookmarks(exact:{json.dumps(name)}, exact:{json.dumps(remote)})"
+
+
+def repo_from_url(url):
+    if "://" not in url:
+        match = re.fullmatch(r"(?:[^@/]+@)?([^:/]+):(.+)", url)
+        if not match:
+            fail("cannot infer GitHub repository from remote URL; pass --repo OWNER/REPO")
+        url = f"ssh://{match[1]}/{match[2]}"
+    parsed = urlsplit(url)
+    path = parsed.path.strip("/").removesuffix(".git")
+    if not parsed.hostname or len(path.split("/")) != 2:
+        fail("cannot infer GitHub repository from remote URL; pass --repo OWNER/REPO")
+    return f"{parsed.hostname}/{path}"
+
+
+class GitHub:
+    def __init__(self, options):
+        self.remote = options.remote
+        remotes = dict(line.split(maxsplit=1) for line in jj("git", "remote", "list").splitlines())
+        if self.remote not in remotes:
+            fail(f"no jj Git remote named {self.remote!r}")
+        self.repo = options.repo or repo_from_url(remotes[self.remote])
+
+    def gh(self, *args):
+        return run("gh", *args, "--repo", self.repo)
+
+    def find(self, branch):
+        prs = json.loads(self.gh("pr", "list", "--head", branch, "--state", "all",
+                                 "--limit", "100", "--json", "url,state,baseRefName"))
+        opened = [pr for pr in prs if pr["state"] == "OPEN"]
+        if len(opened) > 1:
+            fail(f"multiple open PRs for {branch}")
+        return opened[0] if opened else (prs[0] if prs else None)
+
+    def require_open(self, branch):
+        pr = self.find(branch)
+        if not pr or pr["state"] != "OPEN":
+            fail(f"no open PR for {branch}; use submit for a new change")
+        return pr
+
+    def default_base(self):
+        # Unlike `gh pr`, `gh repo view` takes the repository positionally.
+        result = json.loads(run("gh", "repo", "view", self.repo,
+                                "--json", "defaultBranchRef"))
+        if not result.get("defaultBranchRef"):
+            fail("GitHub repository has no default branch; pass --base")
+        return result["defaultBranchRef"]["name"]
+
+
+def validate(change, base, remote):
+    if change["conflict"] or change["empty"] or not change["description"].strip():
+        fail("publish a nonempty, described, conflict-free change (use jj describe / jj resolve)")
+    base_change = one(remote_ref(base, remote))
+    # The PR must introduce exactly this change, including for stacked PRs.
+    introduced = changes(f'{base_change["commit"]}..{change["commit"]}')
+    if [item["commit"] for item in introduced] != [change["commit"]]:
+        fail("PR would include other changes (or none). Rebase onto the fetched base, "
+             "or submit the parent first and use --onto for a stack")
+    if len(changes(f'parents({change["commit"]})')) != 1:
+        fail("integration merges are local testing changes; submit their individual parents")
+    refs = changes(f'bookmarks(exact:{json.dumps(bookmark(change))})')
+    if refs and [item["commit"] for item in refs] != [change["commit"]]:
+        fail("the review bookmark has moved or is conflicted; resolve it with jj bookmark first")
+
+
+def publish(change, remote):
+    # jj performs its own remote lease, private-change and conflict checks. Do not
+    # fetch automatically: that could accept unexpected remote edits before push.
+    output = jj("--config", 'templates.git_push_bookmark=\'"pile/" ++ change_id\'',
+                "git", "push", "--remote", remote, "--change", change["commit"])
+    if output:
+        print(output, end="")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("submit", "update", "open", "status"):
+        command = sub.add_parser(name)
+        command.add_argument("-r", "--revision", default="@" if name != "status" else "trunk()..@",
+                             help="jj revset (default: @; status: trunk()..@)")
+        command.add_argument("--remote", default="origin", help="Git remote (default: origin)")
+        command.add_argument("--repo", help="GitHub OWNER/REPO or URL (default: remote URL)")
+        if name == "submit":
+            base = command.add_mutually_exclusive_group()
+            base.add_argument("--base", help="base branch (default: GitHub default branch)")
+            base.add_argument("--onto", help="parent change with an open PR")
+            command.add_argument("--draft", action="store_true")
+    options = parser.parse_args()
+    github = GitHub(options)
+    if options.command == "status":
+        for change in changes(options.revision):
+            pr = github.find(bookmark(change))
+            state = pr["state"].lower() if pr else "unsubmitted"
+            title = change["description"].splitlines()
+            print(change["change"][:12], state, title[0] if title else "(no description)",
+                  pr["url"] if pr else "")
+        return
+    change = one(options.revision)
+    branch = bookmark(change)
+    if options.command == "open":
+        pr = github.find(branch)
+        if not pr:
+            fail(f"no PR for {branch}")
+        github.gh("pr", "view", pr["url"], "--web")
+        return
+    if options.command == "update":
+        pr = github.require_open(branch)
+        validate(change, pr["baseRefName"], options.remote)
+        publish(change, options.remote)
+        print(pr["url"])
+        return
+    existing = github.find(branch)
+    if existing:
+        if existing["state"] == "OPEN":
+            print(existing["url"])
+            return
+        fail("this change already has a closed or merged PR; create a new jj change")
+    if options.onto:
+        parent = one(options.onto)
+        base = bookmark(parent)
+        github.require_open(base)
+        if one(remote_ref(base, options.remote))["commit"] != parent["commit"]:
+            fail("update the parent PR before submitting its child")
+    else:
+        base = options.base or github.default_base()
+    validate(change, base, options.remote)
+    publish(change, options.remote)
+    title, _, body = change["description"].strip().partition("\n")
+    print(github.gh("pr", "create", "--head", branch, "--base", base,
+                    "--title", title, "--body", body.strip(),
+                    *(["--draft"] if options.draft else [])).strip())
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except subprocess.CalledProcessError as error:
+        print(error.stderr or str(error), file=sys.stderr, end="\n")
+        raise SystemExit(error.returncode) from None
+    except (OSError, ValueError) as error:
+        fail(str(error))
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
