@@ -11,11 +11,20 @@ available separately.
 nix profile install .#jj-pile
 ```
 
+With Home Manager, import `homeManagerModules.default` from this flake and
+enable the module. It installs `jj-pile`, enables Jujutsu, and configures the
+`jj pile` alias automatically:
+
+```nix
+programs.jj-pile.enable = true;
+```
+
 Or add this repository's `bin` to `PATH` and install Python 3.10+, Git,
 Jujutsu, and `gh`. Tested with jj 0.36.0 and 0.41.0. Authenticate with `gh auth login`.
 Both colocated and non-colocated jj Git repositories work.
 
-To invoke it as `jj pile`, add this to your jj configuration:
+If you are not using the Home Manager module, invoke it as `jj pile` by adding
+this to your jj configuration:
 
 ```toml
 [aliases]

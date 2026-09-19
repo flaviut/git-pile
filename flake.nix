@@ -16,6 +16,15 @@
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
     in
     {
+      overlays.default = final: prev: {
+        inherit (self.packages.${final.stdenv.hostPlatform.system}) jj-pile;
+      };
+
+      homeManagerModules.default = { ... }: {
+        imports = [ ./nix/home-manager.nix ];
+        nixpkgs.overlays = [ self.overlays.default ];
+      };
+
       packages = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
