@@ -1,6 +1,6 @@
 # git-pile
 
-`git-pile` is a set of scripts for using a stacked-diff[^1] workflow
+`git-pile` is a set of Python scripts for using a stacked-diff[^1] workflow
 with git & GitHub[^2]. There are a lot of different trade-offs for how
 this can work, `git-pile` chooses to be mostly not-magical at the cost
 of being best at handling multiple commits that _don't conflict_ with
@@ -201,8 +201,19 @@ nix profile install .#git-pile
 
 1. Add this repo's `bin` directory to your `PATH`
 2. Install [gh](https://cli.github.com/)
-3. Install [fzy](https://github.com/jhawthorn/fzy) and `python3`
-   (required for [`git-absorb`](#git-absorb))
+3. Install Python 3.10 or later (required for all commands).
+4. Install [fzy](https://github.com/jhawthorn/fzy)
+   (required for interactive commit selection in [`git-absorb`](#git-absorb)).
+
+The scripts use Python's standard library and invoke Git and the GitHub CLI;
+no Python packages need to be installed. Keep `bin/_git_pile.py` alongside
+the `bin/git-*` commands when copying them elsewhere.
+
+### Development
+
+Run the tests with `python3 -m unittest discover -s tests -v`. They use
+temporary local repositories and a fake GitHub CLI, without contacting a
+hosting service. `nix build` also runs these tests before packaging the commands.
 
 ## Configuration
 

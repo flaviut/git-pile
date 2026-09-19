@@ -20,13 +20,9 @@
         let
           pkgs = import nixpkgs { inherit system; };
           runtimeInputs = with pkgs; [
-            bash
-            coreutils
             fzy
             gh
             git
-            gnugrep
-            gnused
             python3
           ];
         in
@@ -36,14 +32,15 @@
             version = "0.0.0";
             src = ./.;
             nativeBuildInputs = [ pkgs.makeWrapper ];
-            checkInputs = [ pkgs.shellcheck ];
+            nativeCheckInputs = [ pkgs.python3 pkgs.git ];
+            doCheck = true;
 
             installPhase = ''
               runHook preInstall
               mkdir -p "$out/bin"
-              cp -r bin/* "$out/bin/"
-              chmod +x "$out/bin/"*
-              for script in "$out/bin/"*; do
+              cp bin/git-* bin/_git_pile.py "$out/bin/"
+              chmod +x "$out/bin/"git-*
+              for script in "$out/bin/"git-*; do
                 wrapProgram "$script" --prefix PATH : ${pkgs.lib.makeBinPath runtimeInputs}
               done
               runHook postInstall
@@ -51,7 +48,8 @@
 
             checkPhase = ''
               runHook preCheck
-              shellcheck --severity=error --shell=bash bin/*
+              patchShebangs bin
+              python3 -m unittest discover -s tests -v
               runHook postCheck
             '';
 

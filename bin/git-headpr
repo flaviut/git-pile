@@ -1,27 +1,6 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 
-set -euo pipefail
+from _git_pile import main
 
-if [[ -n "${GIT_PILE_VERBOSE:-}" ]]; then
-  set -x
-fi
-
-updatepr_args=()
-commit_args=()
-for arg in "$@"
-do
-  case "$arg" in
-    --squash)
-      # always signoff to avoid pre-commit hook failures, this is ignored anyways
-      commit_args+=(-m ignore -s)
-      updatepr_args+=(--squash)
-      ;;
-    *)
-      commit_args+=("$arg")
-      ;;
-  esac
-done
-
-head_sha=$(git rev-parse HEAD)
-git commit "${commit_args[@]:---}"
-git updatepr "$head_sha" "${updatepr_args[@]:-}"
+if __name__ == "__main__":
+    main("headpr")

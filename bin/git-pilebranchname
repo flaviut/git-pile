@@ -1,18 +1,6 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 
-set -euo pipefail
+from _git_pile import main
 
-readonly ref=$1
-if [[ "$ref" == -* ]]; then
-  echo "error: invalid ref starts with dash: $ref" >&2
-  exit 1
-fi
-
-branch=$(git show --no-patch --no-show-signature --format=%f "$ref")
-if [[ -z "$branch" ]]; then
-  echo "error: no branch found for ref: $ref" >&2
-  exit 1
-fi
-
-branch_name="${GIT_PILE_PREFIX:-}$(echo "$branch" | tr '[:upper:]' '[:lower:]' | sed -e 's/^\.*//' -e 's/\.lock$/-lock/')"
-echo "$branch_name"
+if __name__ == "__main__":
+    main("pilebranchname")

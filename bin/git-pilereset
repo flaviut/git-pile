@@ -1,14 +1,6 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 
-set -euo pipefail
+from _git_pile import main
 
-if [[ -n "${GIT_PILE_VERBOSE:-}" ]]; then
-  set -x
-fi
-
-worktree_dir="$(git pileworktreepath)"
-git worktree remove --force "$worktree_dir"  &> /dev/null || true
-/usr/bin/env rm -rf "$worktree_dir" &> /dev/null || true
-
-# TODO: Should we optionally delete some branch?
-# TODO: Otherwise should we call it pileresetworktree?
+if __name__ == "__main__":
+    main("pilereset")
