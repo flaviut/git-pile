@@ -178,6 +178,37 @@ class JjPile(unittest.TestCase):
         create = next(c for c in self.calls() if c[:2] == ["pr", "create"])
         self.assertEqual(create[create.index("--base") + 1], "release")
 
+    def test_mine_is_preferred_for_pushes(self):
+        mine = self.root / "mine"
+        self.invoke("git", "init", "--bare", str(mine))
+        self.jj("git", "remote", "add", "mine", str(mine))
+        change = self.jj("log", "--no-graph", "-r", "@", "-T", "change_id")
+        self.pile("submit")
+        branch = "pile/" + change
+        self.assertTrue(self.invoke("git", "--git-dir", str(mine), "show-ref",
+                                    "--verify", "refs/heads/" + branch,
+                                    check=False).returncode == 0)
+        self.assertNotEqual(self.invoke("git", "--git-dir", str(self.root / "origin"),
+                                        "show-ref", "--verify", "refs/heads/" + branch,
+                                        check=False).returncode, 0)
+        create = next(c for c in self.calls() if c[:2] == ["pr", "create"])
+        self.assertEqual(create[create.index("--head") + 1], branch)
+
+    def test_fork_head_is_owner_qualified(self):
+        self.jj("git", "remote", "set-url", "origin",
+                "https://github.com/upstream/repo.git")
+        self.jj("git", "remote", "add", "mine",
+                "git@github.com:contributor/repo.git")
+        self.invoke(str(BIN / "jj-pile"), "status", "-r", "@")
+        lookup = self.calls()[-1]
+        self.assertNotIn("contributor:", lookup[lookup.index("--head") + 1])
+        branch = "pile/" + self.jj("log", "--no-graph", "-r", "@", "-T", "change_id")
+        # Exercise PR creation arguments without contacting the non-local fork.
+        module = __import__("runpy").run_path(str(BIN / "jj-pile"), run_name="jj_pile_test")
+        github = object.__new__(module["GitHub"])
+        github.head_owner = "contributor"
+        self.assertEqual(github.head(branch), "contributor:" + branch)
+
     def test_conflicted_change_is_not_published(self):
         first = self.jj("log", "--no-graph", "-r", "@", "-T", "change_id")
         self.jj("new", "main@origin")

@@ -52,12 +52,13 @@ change created by `jj new` or `jj commit`, submission uses its parent. Pass
 `-r @` to select the working-copy change explicitly. Other commands do not
 fall back, and revsets matching multiple changes are rejected.
 
-The remote defaults to `origin`. `--remote NAME` selects another remote;
-the default PR base comes from that repository's GitHub default branch.
+The upstream remote defaults to `origin`. When a `mine` remote exists, review
+bookmarks are pushed there and fork-qualified PRs are opened against `origin`,
+matching `git submitpr`. `--remote NAME` explicitly uses one remote for both
+roles. The default PR base comes from the upstream repository's default branch.
 `submit --base release` selects a different fetched base branch.
-`--repo OWNER/REPO` overrides GitHub repository detection from the remote
-URL. The Git remote and GitHub repository must refer to the same repository;
-cross-repository fork PRs and GitLab are not implemented.
+`--repo OWNER/REPO` overrides upstream GitHub repository detection from the
+remote URL. GitLab is not implemented.
 
 ## Independent reviews, integrated testing
 
@@ -150,7 +151,8 @@ merge, abandonment, or remote branch deletion.
 
 Running `jj pile` without a subcommand is shorthand for `jj pile status`.
 
-Every command accepts `--remote` and `--repo`. To list all local branches
+Every command accepts `--remote` and `--repo`. An explicit `--remote` also
+disables automatic use of `mine`. To list all local branches
 of work, use `jj pile status -r 'trunk()..visible_heads()'`.
 
 The tool requires a nonempty, described, conflict-free change with one parent.

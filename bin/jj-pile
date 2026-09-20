@@ -65,18 +65,41 @@ def repo_from_url(url):
 
 class GitHub:
     def __init__(self, options):
-        self.remote = options.remote
         remotes = dict(line.split(maxsplit=1) for line in jj("git", "remote", "list").splitlines())
+        self.remote = options.remote or "origin"
         if self.remote not in remotes:
             fail(f"no jj Git remote named {self.remote!r}")
+        # Match git-pile: origin (or an explicit --remote) identifies the PR
+        # repository, while a conventional `mine` remote is preferred for pushes.
+        self.push_remote = "mine" if options.remote is None and "mine" in remotes else self.remote
         self.repo = options.repo or repo_from_url(remotes[self.remote])
+        self.head_owner = None
+        if self.push_remote != self.remote:
+            try:
+                push_repo = repo_from_url(remotes[self.push_remote])
+                if push_repo != repo_from_url(remotes[self.remote]):
+                    self.head_owner = push_repo.rsplit("/", 2)[-2]
+            except SystemExit:
+                # Local/file remotes are useful in tests and do not need a
+                # fork-qualified GitHub head.
+                pass
+
+    def head(self, branch):
+        return f"{self.head_owner}:{branch}" if self.head_owner else branch
 
     def gh(self, *args):
         return run("gh", *args, "--repo", self.repo)
 
     def find(self, branch):
+        # `gh pr list --head` only accepts an unqualified branch name. Filter
+        # the returned candidates by owner when pushing from a fork.
         prs = json.loads(self.gh("pr", "list", "--head", branch, "--state", "all",
-                                 "--limit", "100", "--json", "url,state,baseRefName"))
+                                 "--limit", "100", "--json",
+                                 "url,state,baseRefName,headRepositoryOwner"))
+        if self.head_owner:
+            prs = [pr for pr in prs
+                   if not pr.get("headRepositoryOwner")
+                   or pr["headRepositoryOwner"].get("login") == self.head_owner]
         opened = [pr for pr in prs if pr["state"] == "OPEN"]
         if len(opened) > 1:
             fail(f"multiple open PRs for {branch}")
@@ -132,7 +155,7 @@ def main():
             help="jj revset (default: @; submit: parent of an empty, undescribed @; "
                  "status: trunk()..@)",
         )
-        command.add_argument("--remote", default="origin", help="Git remote (default: origin)")
+        command.add_argument("--remote", help="upstream and push remote (default: origin, pushing to mine if present)")
         command.add_argument("--repo", help="GitHub OWNER/REPO or URL (default: remote URL)")
         if name == "submit":
             base = command.add_mutually_exclusive_group()
@@ -165,8 +188,10 @@ def main():
         return
     if options.command == "update":
         pr = github.require_open(branch)
-        validate(change, pr["baseRefName"], options.remote)
-        publish(change, options.remote)
+        base_remote = (github.push_remote if pr["baseRefName"].startswith("pile/")
+                       else github.remote)
+        validate(change, pr["baseRefName"], base_remote)
+        publish(change, github.push_remote)
         print(pr["url"])
         return
     existing = github.find(branch)
@@ -179,14 +204,16 @@ def main():
         parent = one(options.onto)
         base = bookmark(parent)
         github.require_open(base)
-        if one(remote_ref(base, options.remote))["commit"] != parent["commit"]:
+        if one(remote_ref(base, github.push_remote))["commit"] != parent["commit"]:
             fail("update the parent PR before submitting its child")
+        base_remote = github.push_remote
     else:
         base = options.base or github.default_base()
-    validate(change, base, options.remote)
-    publish(change, options.remote)
+        base_remote = github.remote
+    validate(change, base, base_remote)
+    publish(change, github.push_remote)
     title, _, body = change["description"].strip().partition("\n")
-    print(github.gh("pr", "create", "--head", branch, "--base", base,
+    print(github.gh("pr", "create", "--head", github.head(branch), "--base", base,
                     "--title", title, "--body", body.strip(),
                     *(["--draft"] if options.draft else [])).strip())
 
