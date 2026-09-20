@@ -127,10 +127,17 @@ class JjPile(unittest.TestCase):
         self.assertTrue((self.repo / "second.txt").exists())
         self.assertNotEqual(self.pile("submit", check=False).returncode, 0)
 
-    def test_invalid_revisions_and_empty_changes(self):
+    def test_submit_defaults_to_parent_of_empty_working_copy(self):
+        change = self.jj("log", "--no-graph", "-r", "@", "-T", "change_id")
+        self.jj("new")
+        self.pile("submit", "--draft")
+        create = next(c for c in self.calls() if c[:2] == ["pr", "create"])
+        self.assertEqual(create[create.index("--head") + 1], f"pile/{change}")
+
+    def test_invalid_revisions_and_explicit_empty_changes(self):
         self.assertNotEqual(self.pile("submit", "-r", "all()", check=False).returncode, 0)
         self.jj("new")
-        self.assertNotEqual(self.pile("submit", check=False).returncode, 0)
+        self.assertNotEqual(self.pile("submit", "-r", "@", check=False).returncode, 0)
         self.assertFalse(any(c[:2] == ["pr", "create"] for c in self.calls()))
 
     def test_closed_pr_is_not_reused(self):

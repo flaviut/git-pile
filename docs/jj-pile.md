@@ -47,10 +47,10 @@ jj pile submit
 jj new
 ```
 
-Submission uses `@` by default. After `jj new`, use `-r @-` or a change
-ID to select the described change. There is no implicit fallback from an
-empty working copy to its parent. Each mutating command selects exactly
-one revision; revsets matching multiple changes are rejected.
+Submission uses `@` by default. If `@` is the empty, undescribed working-copy
+change created by `jj new` or `jj commit`, submission uses its parent. Pass
+`-r @` to select the working-copy change explicitly. Other commands do not
+fall back, and revsets matching multiple changes are rejected.
 
 The remote defaults to `origin`. `--remote NAME` selects another remote;
 the default PR base comes from that repository's GitHub default branch.

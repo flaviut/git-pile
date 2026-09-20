@@ -127,8 +127,11 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("submit", "update", "open", "status"):
         command = sub.add_parser(name)
-        command.add_argument("-r", "--revision", default="@" if name != "status" else "trunk()..@",
-                             help="jj revset (default: @; status: trunk()..@)")
+        command.add_argument(
+            "-r", "--revision", default="trunk()..@" if name == "status" else None,
+            help="jj revset (default: @; submit: parent of an empty, undescribed @; "
+                 "status: trunk()..@)",
+        )
         command.add_argument("--remote", default="origin", help="Git remote (default: origin)")
         command.add_argument("--repo", help="GitHub OWNER/REPO or URL (default: remote URL)")
         if name == "submit":
@@ -148,7 +151,11 @@ def main():
             print(change["change"][:12], state, title[0] if title else "(no description)",
                   pr["url"] if pr else "")
         return
-    change = one(options.revision)
+    revision = options.revision or "@"
+    change = one(revision)
+    if (options.command == "submit" and options.revision is None
+            and change["empty"] and not change["description"].strip()):
+        change = one(f'parents({change["commit"]})')
     branch = bookmark(change)
     if options.command == "open":
         pr = github.find(branch)
