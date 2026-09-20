@@ -123,7 +123,7 @@ def publish(change, remote):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="jj pile", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("submit", "update", "open", "status"):
         command = sub.add_parser(name)
@@ -136,7 +136,9 @@ def main():
             base.add_argument("--base", help="base branch (default: GitHub default branch)")
             base.add_argument("--onto", help="parent change with an open PR")
             command.add_argument("--draft", action="store_true")
-    options = parser.parse_args()
+    # Treat the top-level command as the status overview. This keeps the
+    # convenient `jj pile` alias useful without requiring a redundant command.
+    options = parser.parse_args(sys.argv[1:] or ["status"])
     github = GitHub(options)
     if options.command == "status":
         for change in changes(options.revision):

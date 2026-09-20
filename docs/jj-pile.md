@@ -28,8 +28,11 @@ this to your jj configuration:
 
 ```toml
 [aliases]
-pile = ["util", "exec", "--", "jj-pile"]
+pile = { definition = ["util", "exec", "--", "jj-pile"], doc = "Publish individual changes as pull requests" }
 ```
+
+Jujutsu's dynamic shell completions include configured aliases such as `pile`;
+its standard, statically generated completions do not.
 
 Examples below use that alias; `jj-pile` accepts the same arguments.
 
@@ -144,6 +147,8 @@ merge, abandonment, or remote branch deletion.
 | `jj pile update [-r REV]` | Push a rewritten change to its existing open PR. |
 | `jj pile open [-r REV]` | Open that change's PR in the browser, including closed PRs. |
 | `jj pile status [-r REVSET]` | Show PR state and URLs; defaults to `trunk()..@`. |
+
+Running `jj pile` without a subcommand is shorthand for `jj pile status`.
 
 Every command accepts `--remote` and `--repo`. To list all local branches
 of work, use `jj pile status -r 'trunk()..visible_heads()'`.

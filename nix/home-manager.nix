@@ -20,7 +20,10 @@ in
 
     programs.jujutsu = {
       enable = true;
-      settings.aliases.pile = [ "util" "exec" "--" "jj-pile" ];
+      settings.aliases.pile = {
+        definition = [ "util" "exec" "--" "jj-pile" ];
+        doc = "Publish individual changes as pull requests";
+      };
     };
   };
 }

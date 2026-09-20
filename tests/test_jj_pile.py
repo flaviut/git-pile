@@ -152,6 +152,16 @@ class JjPile(unittest.TestCase):
         self.jj("pile", "submit", "--repo", "example/repo")
         self.assertTrue((self.repo / ".git").exists())
 
+    def test_bare_alias_defaults_to_status(self):
+        self.jj("config", "set", "--repo", "aliases.pile",
+                '["util", "exec", "--", "jj-pile"]')
+        self.jj("git", "remote", "set-url", "origin", "https://github.com/example/repo.git")
+        self.assertIn("unsubmitted first", self.jj("pile"))
+
+    def test_help_uses_jj_alias_name(self):
+        result = self.invoke(str(BIN / "jj-pile"), "--help")
+        self.assertTrue(result.stdout.startswith("usage: jj pile "))
+
     def test_explicit_base_and_remote(self):
         self.invoke("git", "--git-dir", str(self.root / "origin"),
                     "update-ref", "refs/heads/release", "refs/heads/main")
