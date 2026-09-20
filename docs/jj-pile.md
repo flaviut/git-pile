@@ -28,7 +28,7 @@ this to your jj configuration:
 
 ```toml
 [aliases]
-pile = { definition = ["util", "exec", "--", "jj-pile"], doc = "Publish individual changes as pull requests" }
+pile = ["util", "exec", "--", "jj-pile"]
 ```
 
 Jujutsu's dynamic shell completions include configured aliases such as `pile`;
