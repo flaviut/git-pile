@@ -29,8 +29,15 @@ def changes(revset):
     result = []
     for line in jj("log", "--no-graph", "-r", revset, "-T", template).splitlines():
         commit, change, conflict, empty, description = line.split("\t", 4)
-        result.append(dict(commit=commit, change=change, conflict=conflict == "true",
-                           empty=empty == "true", description=json.loads(description)))
+        result.append(
+            {
+                "commit": commit,
+                "change": change,
+                "conflict": conflict == "true",
+                "empty": empty == "true",
+                "description": json.loads(description),
+            }
+        )
     return result
 
 
@@ -54,7 +61,9 @@ def repo_from_url(url):
     if "://" not in url:
         match = re.fullmatch(r"(?:[^@/]+@)?([^:/]+):(.+)", url)
         if not match:
-            fail("cannot infer GitHub repository from remote URL; pass --repo OWNER/REPO")
+            fail(
+                "cannot infer GitHub repository from remote URL; pass --repo OWNER/REPO"
+            )
         url = f"ssh://{match[1]}/{match[2]}"
     parsed = urlsplit(url)
     path = parsed.path.strip("/").removesuffix(".git")
@@ -65,13 +74,17 @@ def repo_from_url(url):
 
 class GitHub:
     def __init__(self, options):
-        remotes = dict(line.split(maxsplit=1) for line in jj("git", "remote", "list").splitlines())
+        remotes = dict(
+            line.split(maxsplit=1) for line in jj("git", "remote", "list").splitlines()
+        )
         self.remote = options.remote or "origin"
         if self.remote not in remotes:
             fail(f"no jj Git remote named {self.remote!r}")
         # Match git-pile: origin (or an explicit --remote) identifies the PR
         # repository, while a conventional `mine` remote is preferred for pushes.
-        self.push_remote = "mine" if options.remote is None and "mine" in remotes else self.remote
+        self.push_remote = (
+            "mine" if options.remote is None and "mine" in remotes else self.remote
+        )
         self.repo = options.repo or repo_from_url(remotes[self.remote])
         self.head_owner = None
         if self.push_remote != self.remote:
@@ -93,13 +106,27 @@ class GitHub:
     def find(self, branch):
         # `gh pr list --head` only accepts an unqualified branch name. Filter
         # the returned candidates by owner when pushing from a fork.
-        prs = json.loads(self.gh("pr", "list", "--head", branch, "--state", "all",
-                                 "--limit", "100", "--json",
-                                 "url,state,baseRefName,headRepositoryOwner"))
+        prs = json.loads(
+            self.gh(
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--limit",
+                "100",
+                "--json",
+                "url,state,baseRefName,headRepositoryOwner",
+            )
+        )
         if self.head_owner:
-            prs = [pr for pr in prs
-                   if not pr.get("headRepositoryOwner")
-                   or pr["headRepositoryOwner"].get("login") == self.head_owner]
+            prs = [
+                pr
+                for pr in prs
+                if not pr.get("headRepositoryOwner")
+                or pr["headRepositoryOwner"].get("login") == self.head_owner
+            ]
         opened = [pr for pr in prs if pr["state"] == "OPEN"]
         if len(opened) > 1:
             fail(f"multiple open PRs for {branch}")
@@ -113,34 +140,112 @@ class GitHub:
 
     def default_base(self):
         # Unlike `gh pr`, `gh repo view` takes the repository positionally.
-        result = json.loads(run("gh", "repo", "view", self.repo,
-                                "--json", "defaultBranchRef"))
+        result = json.loads(
+            run("gh", "repo", "view", self.repo, "--json", "defaultBranchRef")
+        )
         if not result.get("defaultBranchRef"):
             fail("GitHub repository has no default branch; pass --base")
         return result["defaultBranchRef"]["name"]
 
 
-def validate(change, base, remote):
+def local_ref(name):
+    return f"bookmarks(exact:{json.dumps(name)})"
+
+
+def published_bookmark(change, remote):
+    return f"pile-published/{remote}/{change['change']}"
+
+
+def validate(change, remote):
     if change["conflict"] or change["empty"] or not change["description"].strip():
-        fail("publish a nonempty, described, conflict-free change (use jj describe / jj resolve)")
-    base_change = one(remote_ref(base, remote))
-    # The PR must introduce exactly this change, including for stacked PRs.
-    introduced = changes(f'{base_change["commit"]}..{change["commit"]}')
-    if [item["commit"] for item in introduced] != [change["commit"]]:
-        fail("PR would include other changes (or none). Rebase onto the fetched base, "
-             "or submit the parent first and use --onto for a stack")
-    if len(changes(f'parents({change["commit"]})')) != 1:
-        fail("integration merges are local testing changes; submit their individual parents")
-    refs = changes(f'bookmarks(exact:{json.dumps(bookmark(change))})')
-    if refs and [item["commit"] for item in refs] != [change["commit"]]:
-        fail("the review bookmark has moved or is conflicted; resolve it with jj bookmark first")
+        fail(
+            "publish a nonempty, described, conflict-free change (use jj describe / jj resolve)"
+        )
+    if len(changes(f"parents({change['commit']})")) != 1:
+        fail(
+            "integration merges are local testing changes; submit their individual parents"
+        )
+    private = jj("config", "get", "git.private-commits").strip()
+    if changes(f"({private}) & {change['commit']}"):
+        fail(
+            "the selected change is private; adjust git.private-commits before publishing"
+        )
+    branch = bookmark(change)
+    refs = changes(local_ref(branch))
+    published = changes(local_ref(published_bookmark(change, remote)))
+    fetched = changes(remote_ref(branch, remote))
+    if published:
+        if len(published) != 1 or refs != published or fetched != published:
+            fail(
+                "the review branch has changed since the last publication; inspect remote edits "
+                "and resolve the review bookmark before retrying (see jj-pile recovery docs)"
+            )
+    else:
+        # Adopt reviews made by older jj-pile versions only when their heads
+        # still identify the original change. A remote auto-fix has another ID.
+        if (
+            any(item["change"] != change["change"] for item in refs + fetched)
+            or len(refs) > 1
+        ):
+            fail(
+                "the review bookmark has moved or is conflicted; inspect it before publishing"
+            )
+    return refs
 
 
-def publish(change, remote):
-    # jj performs its own remote lease, private-change and conflict checks. Do not
-    # fetch automatically: that could accept unexpected remote edits before push.
-    output = jj("--config", 'templates.git_push_bookmark=\'"pile/" ++ change_id\'',
-                "git", "push", "--remote", remote, "--change", change["commit"])
+def project(change, base):
+    # Duplicate gives the publication its own identity, so source rewrites do
+    # not move the review bookmark or rebase published descendants.
+    operation = jj("op", "log", "--no-graph", "--limit", "1", "-T", "id").strip()
+    jj(
+        "--config",
+        'templates.duplicate_description="description"',
+        "duplicate",
+        change["commit"],
+        "--onto",
+        base["commit"],
+    )
+    result = one(f"all() ~ at_operation({operation}, all())")
+    if result["conflict"] or result["empty"]:
+        jj("abandon", result["commit"])
+        fail(
+            "the change conflicts with the PR base or is empty on that base; "
+            "resolve the source change or declare its dependency with --onto"
+        )
+    return result
+
+
+def publish(change, base, remote):
+    previous = validate(change, remote)
+    projected = project(change, base)
+    branch = bookmark(change)
+    jj("bookmark", "set", branch, "-r", projected["commit"], "--allow-backwards")
+    try:
+        # Older jj versions require explicit tracking even with --bookmark.
+        jj("bookmark", "track", f"{branch}@{remote}")
+        # Keep jj's remote lease and private-change checks. Never fetch here.
+        output = jj("git", "push", "--remote", remote, "--bookmark", branch)
+    except (subprocess.CalledProcessError, KeyboardInterrupt):
+        if previous:
+            jj(
+                "bookmark",
+                "set",
+                branch,
+                "-r",
+                previous[0]["commit"],
+                "--allow-backwards",
+            )
+        else:
+            jj("bookmark", "delete", branch)
+        raise
+    jj(
+        "bookmark",
+        "set",
+        published_bookmark(change, remote),
+        "-r",
+        projected["commit"],
+        "--allow-backwards",
+    )
     if output:
         print(output, end="")
 
@@ -151,16 +256,27 @@ def main():
     for name in ("submit", "update", "open", "status"):
         command = sub.add_parser(name)
         command.add_argument(
-            "-r", "--revision", default="trunk()..@" if name == "status" else None,
+            "-r",
+            "--revision",
+            default="trunk()..@" if name == "status" else None,
             help="jj revset (default: @; submit: parent of an empty, undescribed @; "
-                 "status: trunk()..@)",
+            "status: trunk()..@)",
         )
-        command.add_argument("--remote", help="upstream and push remote (default: origin, pushing to mine if present)")
-        command.add_argument("--repo", help="GitHub OWNER/REPO or URL (default: remote URL)")
+        command.add_argument(
+            "--remote",
+            help="upstream and push remote (default: origin, pushing to mine if present)",
+        )
+        command.add_argument(
+            "--repo", help="GitHub OWNER/REPO or URL (default: remote URL)"
+        )
         if name == "submit":
             base = command.add_mutually_exclusive_group()
-            base.add_argument("--base", help="base branch (default: GitHub default branch)")
-            base.add_argument("--onto", help="parent change with an open PR")
+            base.add_argument(
+                "--base", help="base branch (default: GitHub default branch)"
+            )
+            base.add_argument(
+                "--onto", help="explicit dependency: change with an open PR"
+            )
             command.add_argument("--draft", action="store_true")
     # Treat the top-level command as the status overview. This keeps the
     # convenient `jj pile` alias useful without requiring a redundant command.
@@ -171,14 +287,22 @@ def main():
             pr = github.find(bookmark(change))
             state = pr["state"].lower() if pr else "unsubmitted"
             title = change["description"].splitlines()
-            print(change["change"][:12], state, title[0] if title else "(no description)",
-                  pr["url"] if pr else "")
+            print(
+                change["change"][:12],
+                state,
+                title[0] if title else "(no description)",
+                pr["url"] if pr else "",
+            )
         return
     revision = options.revision or "@"
     change = one(revision)
-    if (options.command == "submit" and options.revision is None
-            and change["empty"] and not change["description"].strip()):
-        change = one(f'parents({change["commit"]})')
+    if (
+        options.command == "submit"
+        and options.revision is None
+        and change["empty"]
+        and not change["description"].strip()
+    ):
+        change = one(f"parents({change['commit']})")
     branch = bookmark(change)
     if options.command == "open":
         pr = github.find(branch)
@@ -188,10 +312,13 @@ def main():
         return
     if options.command == "update":
         pr = github.require_open(branch)
-        base_remote = (github.push_remote if pr["baseRefName"].startswith("pile/")
-                       else github.remote)
-        validate(change, pr["baseRefName"], base_remote)
-        publish(change, github.push_remote)
+        base_remote = (
+            github.push_remote
+            if pr["baseRefName"].startswith("pile/")
+            else github.remote
+        )
+        base = one(remote_ref(pr["baseRefName"], base_remote))
+        publish(change, base, github.push_remote)
         print(pr["url"])
         return
     existing = github.find(branch)
@@ -202,20 +329,31 @@ def main():
         fail("this change already has a closed or merged PR; create a new jj change")
     if options.onto:
         parent = one(options.onto)
+        if parent["change"] == change["change"]:
+            fail("a change cannot depend on itself")
         base = bookmark(parent)
         github.require_open(base)
-        if one(remote_ref(base, github.push_remote))["commit"] != parent["commit"]:
-            fail("update the parent PR before submitting its child")
         base_remote = github.push_remote
     else:
         base = options.base or github.default_base()
         base_remote = github.remote
-    validate(change, base, base_remote)
-    publish(change, github.push_remote)
+    publish(change, one(remote_ref(base, base_remote)), github.push_remote)
     title, _, body = change["description"].strip().partition("\n")
-    print(github.gh("pr", "create", "--head", github.head(branch), "--base", base,
-                    "--title", title, "--body", body.strip(),
-                    *(["--draft"] if options.draft else [])).strip())
+    print(
+        github.gh(
+            "pr",
+            "create",
+            "--head",
+            github.head(branch),
+            "--base",
+            base,
+            "--title",
+            title,
+            "--body",
+            body.strip(),
+            *(["--draft"] if options.draft else []),
+        ).strip()
+    )
 
 
 if __name__ == "__main__":

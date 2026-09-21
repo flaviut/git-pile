@@ -2,8 +2,8 @@
 
 `jj-pile` publishes individual Jujutsu changes as GitHub PRs. It keeps
 git-pile's small, individually reviewable changes and integrated testing,
-using jj's graph as the source of truth. The existing Git commands remain
-available separately.
+using explicit PR dependencies independently of jj's local graph. The existing
+Git commands remain available separately.
 
 ## Install
 
@@ -20,7 +20,8 @@ programs.jj-pile.enable = true;
 ```
 
 Or add this repository's `bin` to `PATH` and install Python 3.10+, Git,
-Jujutsu, and `gh`. Tested with jj 0.36.0 and 0.41.0. Authenticate with `gh auth login`.
+Jujutsu, and `gh`. Publishing uses `jj duplicate --onto`.
+Authenticate with `gh auth login`.
 Both colocated and non-colocated jj Git repositories work.
 
 If you are not using the Home Manager module, invoke it as `jj pile` by adding
@@ -62,6 +63,23 @@ remote URL. GitLab is not implemented.
 
 ## Independent reviews, integrated testing
 
+Local ancestry does not declare a PR dependency. Without `--onto`, `submit`
+applies only the selected change's diff onto the fetched default branch (or
+`--base`). You can keep a linear local stack and submit its changes in any order:
+
+```sh
+# Local stack: main -> A -> B -> C
+jj pile submit -r <C>
+jj pile submit -r <A>
+jj pile submit -r <B>
+```
+
+Each PR contains one change. Publishing creates a separate commit and leaves
+your source changes, their parents, and the working copy intact. If the diff
+conflicts with the selected base, publication stops; resolve the source change
+or declare the required dependency with `--onto`. A clean application does not
+guarantee semantic independence: build and test against the intended base.
+
 Create independent changes as siblings off the fetched trunk. Combine them
 in a merge working copy to build and test everything together:
 
@@ -85,7 +103,7 @@ jj new <A> <B>
 Replace `<A>` and `<B>` with actual change IDs. The merge working copy is
 for local integration; publish the individual changes with `-r <A>` or
 `-r <B>`. Publishing an ancestor does not switch your working copy.
-If two changes fundamentally depend on each other, stack them instead.
+Declare actual PR dependencies with `--onto`.
 
 ## Dependent reviews
 
@@ -96,12 +114,15 @@ jj describe -m 'Build on feature A'
 jj pile submit --onto <A>
 ```
 
-`--onto` requires A to have an open PR and its current version to be pushed.
-The child PR targets A's review bookmark. Publishing to trunk would include
-A as well, so the command refuses that accidental multi-change PR.
+`--onto` explicitly declares a dependency. A must have an open PR and a fetched
+review branch. The selected change's diff is applied onto A's published head;
+unpublished local edits to A are not included. A need not be the selected
+change's local parent. For example, with local `main -> A -> B`, submit B
+independently, then `jj pile submit -r <A> --onto <B>` to publish `main -> B -> A`.
 
-After editing a parent, jj rebases descendants automatically. Update PRs in
-parent-to-child order so each child's published base matches its local parent.
+After editing a dependency, update PRs in dependency order so each dependent
+PR uses the updated published base. `update` reads its existing base from
+GitHub and reapplies the source diff onto the fetched head of that branch.
 
 ## Incorporate review feedback
 
@@ -119,23 +140,24 @@ and run `jj pile update -r <A>`. When `jj absorb` edits several changes,
 update each affected PR. Normal jj conflict resolution applies.
 
 There are deliberately no separate headpr, replacepr, absorb, or rebasepr
-wrappers. A review identifies a jj change; editing that change updates its
-bookmark automatically. Its full change ID determines the stable bookmark
-`pile/<change-id>`, so changing the description does not lose the PR.
-The bookmark is an ordinary jj bookmark and a normal Git branch on GitHub.
+wrappers. A review identifies a source jj change. Its full change ID determines
+the stable bookmark `pile/<change-id>`, so changing the description does not lose
+the PR. The bookmark points to a separate publishing commit; editing the
+source changes the PR only when you run `update`. The bookmark is an ordinary
+jj bookmark and a normal Git branch on GitHub. Keep editing and selecting the
+original source change, not the generated publishing commit.
 
 ## Refresh and finish
 
 ```sh
 jj git fetch --remote origin
-jj rebase -s <A> -d main@origin
 jj pile update -r <A>
 ```
 
 For a stack whose parent was squash-merged, first ensure GitHub has retargeted
-the child PR to `main` (or change its base using GitHub/`gh`). Fetch, rebase
-the remaining child and its descendants with `jj rebase -s <child> -d main@origin`,
-then update the child PR. `update` reads the PR's current base from GitHub.
+the child PR to `main` (or change its base using GitHub/`gh`). Fetch and run
+`jj pile update -r <child>`. You can rebase your local stack separately when
+convenient. `update` reads the PR's current base from GitHub.
 After verifying the merged result, use native `jj abandon` for obsolete
 local changes and native bookmark commands for cleanup. There is no automatic
 merge, abandonment, or remote branch deletion.
@@ -153,18 +175,37 @@ Running `jj pile` without a subcommand is shorthand for `jj pile status`.
 
 Every command accepts `--remote` and `--repo`. An explicit `--remote` also
 disables automatic use of `mine`. To list all local branches
-of work, use `jj pile status -r 'trunk()..visible_heads()'`.
+of work, use `jj pile status -r 'trunk()..visible_heads()'`. This broad revset
+also includes generated publishing commits; select source revisions to query
+their PRs.
 
 The tool requires a nonempty, described, conflict-free change with one parent.
-It checks that the fetched base-to-change range contains exactly one commit
-before pushing. It does not cherry-pick or project a linear pile onto separate
-review branches. Reshape an existing linear pile using native `jj rebase`,
-or submit it as an explicit stack.
+It duplicates that change onto the fetched PR base and rejects a conflicted or
+empty result before pushing. Only the selected diff is applied; local ancestors
+are never implicitly included. Merge changes remain for local integration.
 
 Pushes use jj's remote-state checks and private-change rules. Commands do not
 fetch automatically. If someone changes a review branch remotely, inspect it
-with `jj git fetch` and resolve any bookmark conflict before retrying. Neither
-remote edits nor conflicts are automatically overwritten.
+with `jj git fetch`. A local `pile-published/<remote>/<full-change-id>` bookmark
+records the last successful publication, so even a fetched remote auto-fix
+blocks an update until you acknowledge it. These bookkeeping bookmarks are
+not pushed by jj-pile; avoid including them in a manual `jj git push --all`.
+
+After inspecting the remote diff and incorporating the desired edits into the
+source change, acknowledge the fetched head by setting both local bookmarks:
+
+```sh
+jj bookmark set pile/<full-change-id> pile-published/origin/<full-change-id> \
+  -r 'pile/<full-change-id>@origin' --allow-backwards
+jj pile update -r <source-change-id>
+```
+
+Replace `origin` with the push remote, such as `mine`, when applicable. This is
+an explicit acknowledgment that the next update may replace that remote head.
+Do not acknowledge edits you have not reviewed. The same procedure can restore
+bookkeeping after an interrupted push or when adopting a review in another
+clone. Existing reviews from older jj-pile versions are adopted automatically
+when their heads still identify the original source change.
 
 If pushing succeeds but PR creation fails, the bookmark remains available.
 Retry `submit` to finish creating the PR. If the PR already exists, `submit`
