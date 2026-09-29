@@ -34,6 +34,11 @@
             git
             python3
           ];
+          # These disposable repositories do not need crash-durable writes.
+          checkPython =
+            pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux
+              "${pkgs.libeatmydata}/bin/eatmydata "
+            + "python3";
         in
         {
           git-pile = pkgs.stdenvNoCC.mkDerivation {
@@ -58,7 +63,7 @@
             checkPhase = ''
               runHook preCheck
               patchShebangs bin
-              python3 -m unittest discover -s tests -v
+              ${checkPython} -m unittest discover -s tests -p test_commands.py -v
               runHook postCheck
             '';
 
@@ -90,7 +95,7 @@
             checkPhase = ''
               runHook preCheck
               patchShebangs bin
-              python3 -m unittest discover -s tests -v
+              ${checkPython} -m unittest discover -s tests -p test_jj_pile.py -v
               runHook postCheck
             '';
 

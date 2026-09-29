@@ -227,7 +227,15 @@ nix build .#jj-pile
 
 Integration tests use real jj repositories and local bare Git remotes with a
 fake `gh`, so they do not contact GitHub. The jj tests skip when jj is absent;
-the `jj-pile` Nix package supplies jj and runs both command suites.
+the `jj-pile` Nix package supplies jj and runs the jj suite. The `git-pile`
+package runs the Git suite.
+
+On Linux, the Nix checks use `eatmydata` to avoid flushing disposable test
+repositories to disk. For the same behavior when running both suites locally:
+
+```sh
+nix shell nixpkgs#libeatmydata -c eatmydata python3 -m unittest discover -s tests -v
+```
 
 The design follows jj's native [bookmark semantics](https://docs.jj-vcs.dev/latest/bookmarks/)
 and [external command aliases](https://docs.jj-vcs.dev/latest/cli-reference/#jj-util-exec).
