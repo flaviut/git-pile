@@ -5,6 +5,8 @@ import collections
 import subprocess
 import sys
 
+from _git_pile import branch_name, exists, git
+
 RED = "\033[91m"
 RESET = "\033[0m"
 
@@ -142,6 +144,19 @@ def _main(squash: bool, commit_args: list[str]) -> None:
 
     if stage_first:
         _run_git_command(["add"] + changed_files)
+
+    if not exists(branch_name(selected_sha)):
+        git("commit", "--quiet", "--fixup=" + selected_sha, *commit_args)
+        git(
+            "rebase",
+            "--quiet",
+            "--interactive",
+            "--autostash",
+            "--autosquash",
+            selected_sha + "^",
+            env={"GIT_SEQUENCE_EDITOR": "true"},
+        )
+        return
 
     args = commit_args
     if squash:

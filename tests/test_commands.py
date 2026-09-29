@@ -190,6 +190,55 @@ class Commands(unittest.TestCase):
             self.command("show", "feature:feature.txt").stdout, "absorbed update\n"
         )
 
+    def test_absorb_without_pr_amends_head(self):
+        original = self.commit("Feature")
+        parent = self.command("rev-parse", "HEAD^").stdout
+        message = self.command("show", "-s", "--format=%B", "HEAD").stdout
+        (self.repo / "feature.txt").write_text("absorbed update\n")
+        result = self.command("absorb")
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertNotEqual(self.command("rev-parse", "HEAD").stdout.strip(), original)
+        self.assertEqual(self.command("rev-parse", "HEAD^").stdout, parent)
+        self.assertEqual(
+            self.command("show", "-s", "--format=%B", "HEAD").stdout, message
+        )
+        self.assertEqual(
+            self.command("show", "HEAD:feature.txt").stdout, "absorbed update\n"
+        )
+        self.assertEqual(self.command("status", "--porcelain").stdout, "")
+        self.assertEqual(self.command("branch", "--list", "feature").stdout, "")
+        self.assertFalse((self.root / "gh.log").exists())
+
+    def test_absorb_without_pr_squashes_into_head(self):
+        self.commit("Feature")
+        (self.repo / "feature.txt").write_text("absorbed update\n")
+        self.command("absorb", "--squash")
+        self.assertEqual(
+            self.command("show", "HEAD:feature.txt").stdout, "absorbed update\n"
+        )
+        self.assertEqual(
+            self.command("log", "--format=%s", "origin/main..HEAD").stdout, "Feature\n"
+        )
+
+    def test_absorb_without_pr_fixes_earlier_commit(self):
+        self.commit("Feature")
+        self.commit("Later", "later.txt", "later\n")
+        (self.repo / "feature.txt").write_text("absorbed update\n")
+        self.command("add", "feature.txt")
+        (self.repo / "later.txt").write_text("unstaged update\n")
+        self.command("absorb")
+        self.assertEqual(
+            self.command("show", "HEAD^:feature.txt").stdout, "absorbed update\n"
+        )
+        self.assertEqual(
+            self.command("log", "--format=%s", "origin/main..HEAD").stdout,
+            "Later\nFeature\n",
+        )
+        self.assertEqual(self.command("show", "HEAD:later.txt").stdout, "later\n")
+        self.assertEqual((self.repo / "later.txt").read_text(), "unstaged update\n")
+        self.assertEqual(self.command("diff", "--cached").stdout, "")
+
     def test_replace_rebase_and_cleanup(self):
         self.commit("Feature")
         self.command("submitpr")
