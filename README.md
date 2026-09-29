@@ -216,7 +216,10 @@ the `bin/git-*` commands when copying them elsewhere.
 
 Run the tests with `python3 -m unittest discover -s tests -v`. They use
 temporary local repositories and a fake GitHub CLI, without contacting a
-hosting service. `nix build` also runs these tests before packaging the commands.
+hosting service. For parallel execution, use `nix develop -c pytest -n 4 tests`.
+On Linux, use `nix develop -c eatmydata pytest -n 4 tests` to avoid flushing
+disposable repositories to disk. `nix build` runs each package's tests in
+parallel, using up to four of its allocated build cores.
 
 ## Configuration
 

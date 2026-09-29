@@ -17,7 +17,7 @@ pile = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pile)
 
 
-class Commands(unittest.TestCase):
+class RepositoryTestCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="git-pile-test-")
         self.addCleanup(self.temp.cleanup)
@@ -90,6 +90,8 @@ class Commands(unittest.TestCase):
         self.command("commit", "-m", subject)
         return self.command("rev-parse", "HEAD").stdout.strip()
 
+
+class Commands(RepositoryTestCase):
     def test_branch_names(self):
         self.commit("...Mixed Case.lock")
         self.assertEqual(
@@ -248,7 +250,16 @@ class Commands(unittest.TestCase):
         self.assertEqual(
             self.command("show", "feature:feature.txt").stdout, "replacement\n"
         )
+        self.command("checkout", "-b", "upstream", "origin/main")
+        upstream = self.commit("Upstream", "upstream.txt", "upstream\n")
+        self.command("push", "origin", "HEAD:main")
+        self.command("checkout", "main")
         self.command("rebasepr", "HEAD", "--force")
+        self.assertEqual(self.command("rev-parse", "feature^").stdout.strip(), upstream)
+        self.assertEqual(
+            self.command("rev-parse", "origin/feature").stdout,
+            self.command("rev-parse", "feature").stdout,
+        )
         self.command("pilecleanupremotebranch", "HEAD")
         self.assertNotEqual(
             self.command(

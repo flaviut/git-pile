@@ -34,11 +34,27 @@
             git
             python3
           ];
+          testInputs = with pkgs; [
+            python3
+            python3Packages.pytest
+            python3Packages.pytest-xdist
+            git
+          ];
           # These disposable repositories do not need crash-durable writes.
-          checkPython =
+          checkRunner =
             pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux
               "${pkgs.libeatmydata}/bin/eatmydata "
-            + "python3";
+            + "pytest";
+          checkTests = testFile: ''
+            runHook preCheck
+            patchShebangs bin
+            testJobs=''${NIX_BUILD_CORES:-1}
+            if [ "$testJobs" -eq 0 ] || [ "$testJobs" -gt 4 ]; then
+              testJobs=4
+            fi
+            ${checkRunner} -n "$testJobs" ${testFile}
+            runHook postCheck
+          '';
         in
         {
           git-pile = pkgs.stdenvNoCC.mkDerivation {
@@ -46,7 +62,7 @@
             version = "0.0.0";
             src = ./.;
             nativeBuildInputs = [ pkgs.makeWrapper ];
-            nativeCheckInputs = [ pkgs.python3 pkgs.git ];
+            nativeCheckInputs = testInputs;
             doCheck = true;
 
             installPhase = ''
@@ -60,12 +76,7 @@
               runHook postInstall
             '';
 
-            checkPhase = ''
-              runHook preCheck
-              patchShebangs bin
-              ${checkPython} -m unittest discover -s tests -p test_commands.py -v
-              runHook postCheck
-            '';
+            checkPhase = checkTests "tests/test_commands.py";
 
             meta = with pkgs.lib; {
               description = "Stacked-diff workflow scripts for git and GitHub";
@@ -80,7 +91,7 @@
             version = "0.0.0";
             src = ./.;
             nativeBuildInputs = [ pkgs.makeWrapper ];
-            nativeCheckInputs = [ pkgs.python3 pkgs.git pkgs.jujutsu ];
+            nativeCheckInputs = testInputs ++ [ pkgs.jujutsu ];
             doCheck = true;
 
             installPhase = ''
@@ -92,12 +103,7 @@
               runHook postInstall
             '';
 
-            checkPhase = ''
-              runHook preCheck
-              patchShebangs bin
-              ${checkPython} -m unittest discover -s tests -p test_jj_pile.py -v
-              runHook postCheck
-            '';
+            checkPhase = checkTests "tests/test_jj_pile.py";
 
             meta = with pkgs.lib; {
               description = "Change-based pull requests for Jujutsu and GitHub";
@@ -109,6 +115,22 @@
           };
 
           default = self.packages.${system}.git-pile;
+        });
+
+      devShells = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        {
+          default = pkgs.mkShell {
+            packages = with pkgs; [
+              git
+              jujutsu
+              python3
+              python3Packages.pytest
+              python3Packages.pytest-xdist
+            ] ++ pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.libeatmydata;
+          };
         });
     };
 }

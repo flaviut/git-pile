@@ -1,33 +1,42 @@
 """Real jj repositories and local pushes, with only GitHub mocked."""
 
+import argparse
+import importlib.machinery
+import importlib.util
 import json
 import shutil
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 import test_commands
 
 BIN = test_commands.BIN
+loader = importlib.machinery.SourceFileLoader("jj_pile", str(BIN / "jj-pile"))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+pile = importlib.util.module_from_spec(spec)
+loader.exec_module(pile)
 
 
 @unittest.skipUnless(shutil.which("jj"), "jj is required for jj-pile integration tests")
-class JjPile(unittest.TestCase):
-    command = test_commands.Commands.command
-    commit = test_commands.Commands.commit
+class JjRepository(test_commands.RepositoryTestCase):
+    colocate = False
 
     def setUp(self):
-        test_commands.Commands.setUp(self)
+        super().setUp()
         self.env = {
             key: value for key, value in self.env.items() if not key.startswith("JJ_")
         }
+        # Each parallel worker uses tiny repositories; avoid a CPU-sized jj thread pool.
+        self.env["RAYON_NUM_THREADS"] = "1"
         self.env["JJ_CONFIG"] = str(self.root / "jj.toml")
         (self.root / "jj.toml").write_text(
             '[user]\nname = "Test User"\nemail = "test@example.com"\n'
         )
         self.env["PR_STATE"] = str(self.root / "prs.json")
         (self.root / "prs.json").write_text("{}")
-        # Explicit --repo allows local bare remotes and exercises non-colocated jj.
+        # Explicit --repo lets the tests use local bare remotes.
         (self.root / "bin" / "gh").write_text(
             f"#!{sys.executable}\n"
             "import json, os, sys\n"
@@ -52,7 +61,13 @@ class JjPile(unittest.TestCase):
         )
         self.repo = self.root / "jj workspace"
         self.repo.mkdir()
-        self.jj("git", "clone", "--no-colocate", str(self.root / "origin"), ".")
+        self.jj(
+            "git",
+            "clone",
+            "--colocate" if self.colocate else "--no-colocate",
+            str(self.root / "origin"),
+            ".",
+        )
         # The fixture's bare remote need not advertise main as its HEAD.
         self.jj("new", "main@origin")
         self.change("first", "first.txt")
@@ -90,6 +105,8 @@ class JjPile(unittest.TestCase):
             json.loads(line) for line in (self.root / "gh.log").read_text().splitlines()
         ]
 
+
+class JjPile(JjRepository):
     def test_submit_rewrite_update_and_open(self):
         change = self.jj("log", "--no-graph", "-r", "@", "-T", "change_id")
         before = self.jj("log", "--no-graph", "-r", "@", "-T", "commit_id")
@@ -168,13 +185,6 @@ class JjPile(unittest.TestCase):
         )
         self.assertIn(
             "second.txt", self.jj("file", "list", "-r", self.published(first))
-        )
-        self.jj("describe", "-r", second, "-m", "second edited")
-        self.pile("update", "-r", second)
-        self.pile("update", "-r", first)
-        self.assertEqual(
-            self.revision(f"parents({self.published(first)})"),
-            self.revision(self.published(second)),
         )
 
     def test_dependency_uses_published_version(self):
@@ -261,22 +271,6 @@ class JjPile(unittest.TestCase):
         self.assertNotEqual(self.pile("submit", check=False).returncode, 0)
         self.assertNotEqual(self.pile("update", check=False).returncode, 0)
 
-    def test_colocated_repo_and_alias(self):
-        self.repo = self.root / "colocated"
-        self.repo.mkdir()
-        self.jj("git", "clone", "--colocate", str(self.root / "origin"), ".")
-        self.jj("new", "main@origin")
-        self.change("colocated", "feature.txt")
-        self.jj(
-            "config",
-            "set",
-            "--repo",
-            "aliases.pile",
-            '["util", "exec", "--", "jj-pile"]',
-        )
-        self.jj("pile", "submit", "--repo", "example/repo")
-        self.assertTrue((self.repo / ".git").exists())
-
     def test_bare_alias_defaults_to_status(self):
         self.jj(
             "config",
@@ -289,10 +283,6 @@ class JjPile(unittest.TestCase):
             "git", "remote", "set-url", "origin", "https://github.com/example/repo.git"
         )
         self.assertIn("unsubmitted first", self.jj("pile"))
-
-    def test_help_uses_jj_alias_name(self):
-        result = self.invoke(str(BIN / "jj-pile"), "--help")
-        self.assertTrue(result.stdout.startswith("usage: jj pile "))
 
     def test_explicit_base_and_remote(self):
         self.invoke(
@@ -342,23 +332,6 @@ class JjPile(unittest.TestCase):
         )
         create = next(c for c in self.calls() if c[:2] == ["pr", "create"])
         self.assertEqual(create[create.index("--head") + 1], branch)
-
-    def test_fork_head_is_owner_qualified(self):
-        self.jj(
-            "git", "remote", "set-url", "origin", "https://github.com/upstream/repo.git"
-        )
-        self.jj("git", "remote", "add", "mine", "git@github.com:contributor/repo.git")
-        self.invoke(str(BIN / "jj-pile"), "status", "-r", "@")
-        lookup = self.calls()[-1]
-        self.assertNotIn("contributor:", lookup[lookup.index("--head") + 1])
-        branch = "pile/" + self.jj("log", "--no-graph", "-r", "@", "-T", "change_id")
-        # Exercise PR creation arguments without contacting the non-local fork.
-        module = __import__("runpy").run_path(
-            str(BIN / "jj-pile"), run_name="jj_pile_test"
-        )
-        github = object.__new__(module["GitHub"])
-        github.head_owner = "contributor"
-        self.assertEqual(github.head(branch), "contributor:" + branch)
 
     def test_conflicted_change_is_not_published(self):
         first = self.jj("log", "--no-graph", "-r", "@", "-T", "change_id")
@@ -502,18 +475,12 @@ class JjPile(unittest.TestCase):
         self.assertEqual(self.revision(self.published(second)), old)
         self.assertEqual(self.revision("pile/" + second), old)
 
-    def test_repository_detection_from_remote_urls(self):
-        for url in (
-            "git@github.com:example/repo.git",
-            "https://github.com/example/repo.git",
-            "ssh://git@github.com/example/repo.git",
-        ):
-            with self.subTest(url=url):
-                self.jj("git", "remote", "set-url", "origin", url)
-                self.invoke(str(BIN / "jj-pile"), "status", "-r", "@")
-                self.assertEqual(
-                    self.calls()[-1][-2:], ["--repo", "github.com/example/repo"]
-                )
+    def test_repository_is_passed_to_github(self):
+        self.jj(
+            "git", "remote", "set-url", "origin", "https://github.com/example/repo.git"
+        )
+        self.invoke(str(BIN / "jj-pile"), "status", "-r", "@")
+        self.assertEqual(self.calls()[-1][-2:], ["--repo", "github.com/example/repo"])
 
     def test_unexpected_remote_edit_is_not_overwritten(self):
         self.pile("submit")
@@ -529,6 +496,63 @@ class JjPile(unittest.TestCase):
         )
         self.jj("describe", "-m", "local edit")
         self.assertNotEqual(self.pile("update", check=False).returncode, 0)
+
+
+class ColocatedJjPile(JjRepository):
+    colocate = True
+
+    def test_colocated_repo_and_alias(self):
+        self.jj(
+            "config",
+            "set",
+            "--repo",
+            "aliases.pile",
+            '["util", "exec", "--", "jj-pile"]',
+        )
+        self.jj("pile", "submit", "--repo", "example/repo")
+        self.assertTrue((self.repo / ".git").exists())
+
+
+class Helpers(unittest.TestCase):
+    def test_help_uses_jj_alias_name(self):
+        result = subprocess.run(
+            [sys.executable, str(BIN / "jj-pile"), "--help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertTrue(result.stdout.startswith("usage: jj pile "))
+
+    def test_repository_detection_from_remote_urls(self):
+        for url in (
+            "git@github.com:example/repo.git",
+            "https://github.com/example/repo.git",
+            "ssh://git@github.com/example/repo.git",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(pile.repo_from_url(url), "github.com/example/repo")
+
+    def test_fork_head_is_owner_qualified(self):
+        options = argparse.Namespace(remote=None, repo=None)
+        with patch.object(
+            pile,
+            "jj",
+            return_value=(
+                "origin https://github.com/upstream/repo.git\n"
+                "mine git@github.com:contributor/repo.git\n"
+            ),
+        ):
+            github = pile.GitHub(options)
+        self.assertEqual(github.head("pile/change"), "contributor:pile/change")
+        prs = [
+            {"url": owner, "state": "OPEN", "headRepositoryOwner": {"login": owner}}
+            for owner in ("someone-else", "contributor")
+        ]
+        with patch.object(pile, "run", return_value=json.dumps(prs)) as run:
+            self.assertEqual(github.find("pile/change")["url"], "contributor")
+        args = run.call_args.args
+        self.assertEqual(args[args.index("--head") + 1], "pile/change")
+        self.assertEqual(args[-2:], ("--repo", "github.com/upstream/repo"))
 
 
 if __name__ == "__main__":

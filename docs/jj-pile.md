@@ -222,6 +222,7 @@ created.
 
 ```sh
 python3 -m unittest discover -s tests -v
+nix develop -c pytest -n 4 tests
 nix build .#jj-pile
 ```
 
@@ -234,7 +235,7 @@ On Linux, the Nix checks use `eatmydata` to avoid flushing disposable test
 repositories to disk. For the same behavior when running both suites locally:
 
 ```sh
-nix shell nixpkgs#libeatmydata -c eatmydata python3 -m unittest discover -s tests -v
+nix develop -c eatmydata pytest -n 4 tests
 ```
 
 The design follows jj's native [bookmark semantics](https://docs.jj-vcs.dev/latest/bookmarks/)
