@@ -35,11 +35,14 @@ class RepositoryTestCase(unittest.TestCase):
         gh = fake_bin / "gh"
         gh.write_text(
             f"#!{sys.executable}\n"
-            "import json, os, sys\n"
+            "import json, os, sys, subprocess\n"
             "with open(os.environ['GH_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
             "if sys.argv[1:3] == ['pr', 'create']:\n"
+            "    if os.environ.get('GH_ADVANCE_REMOTE'): subprocess.run(['git', 'push', '--force', 'origin', 'main^:refs/heads/feature'], check=True)\n"
             "    if os.environ.get('GH_FAIL'): sys.exit(1)\n"
             "    print('https://github.com/example/repo/pull/1')\n"
+            "elif sys.argv[1:3] == ['pr', 'merge']:\n"
+            "    if os.environ.get('GH_FAIL_MERGE'): sys.exit(1)\n"
             "elif sys.argv[1:3] == ['pr', 'list']:\n"
             "    if '--jq' in sys.argv: print('https://github.com/example/repo/pull/1')\n"
             "    elif '--head' in sys.argv: print('[{\"url\": \"https://github.com/example/repo/pull/1\"}]')\n"
@@ -57,7 +60,11 @@ class RepositoryTestCase(unittest.TestCase):
         glab.chmod(0o755)
         for opener in ("open", "xdg-open"):
             script = fake_bin / opener
-            script.write_text(f"#!{sys.executable}\n")
+            script.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                "sys.exit(1 if os.environ.get('OPENER_FAIL') else 0)\n"
+            )
             script.chmod(0o755)
         self.env = {
             **{
@@ -372,7 +379,6 @@ class Commands(RepositoryTestCase):
     def test_failed_create_cleans_worktree(self):
         self.commit("Feature")
         self.env["GH_FAIL"] = "1"
-        self.command("config", "pile.cleanupRemoteOnSubmitFailure", "true")
         result = self.command("submitpr", check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("failed to create PR", result.stderr)
@@ -384,6 +390,101 @@ class Commands(RepositoryTestCase):
                 "show-ref", "--verify", "refs/heads/feature", check=False
             ).returncode,
             0,
+        )
+
+    def test_failed_create_can_be_retried_after_amending(self):
+        self.commit("Feature")
+        self.env["GH_FAIL"] = "1"
+        self.assertNotEqual(self.command("submitpr", check=False).returncode, 0)
+        self.command("commit", "--amend", "-m", "Feature", "-m", "Updated body")
+        del self.env["GH_FAIL"]
+        self.command("submitpr")
+
+    def test_failed_create_cleans_fork_for_both_hosts(self):
+        self.command("init", "--bare", str(self.root / "fork"))
+        self.command("remote", "add", "mine", str(self.root / "fork"))
+        for host, failure in (("github.com", "GH_FAIL"), ("gitlab.com", "GLAB_FAIL")):
+            with self.subTest(host=host):
+                self.command(
+                    "remote", "set-url", "origin", f"https://{host}/team/repo.git"
+                )
+                self.commit("Feature", contents=host)
+                self.env[failure] = "1"
+                self.assertNotEqual(
+                    self.command("submitpr", check=False).returncode, 0
+                )
+                del self.env[failure]
+                self.assertEqual(
+                    self.command("ls-remote", "mine", "refs/heads/feature").stdout, ""
+                )
+                self.assertFalse(self.command("branch", "--list", "feature").stdout)
+
+    def test_failed_push_preserves_existing_remote_branch(self):
+        base = self.command("rev-parse", "HEAD").stdout.strip()
+        self.command("push", "origin", "HEAD:feature")
+        self.commit("Feature")
+        self.assertNotEqual(self.command("submitpr", check=False).returncode, 0)
+        self.assertEqual(
+            self.command("ls-remote", "origin", "refs/heads/feature").stdout.split()[0],
+            base,
+        )
+        self.assertFalse(self.command("branch", "--list", "feature").stdout)
+        self.assertFalse((self.root / "gh.log").exists())
+
+    def test_cleanup_preserves_remote_changed_during_creation(self):
+        self.commit("Feature")
+        self.env["GH_FAIL"] = "1"
+        self.env["GH_ADVANCE_REMOTE"] = "1"
+        result = self.command("submitpr", check=False)
+        self.assertIn("failed to create PR", result.stderr)
+        self.assertIn("could not clean up", result.stderr)
+        self.assertEqual(
+            self.command("ls-remote", "origin", "refs/heads/feature").stdout.split()[0],
+            self.command("rev-parse", "main^").stdout.strip(),
+        )
+
+    def test_auto_merge_failure_preserves_created_pr_branch(self):
+        self.commit("Feature")
+        self.env["GH_FAIL_MERGE"] = "1"
+        result = self.command("submitpr", "--merge-squash", check=False)
+        self.assertIn("failed to auto-merge PR", result.stderr)
+        self.assertTrue(self.command("branch", "--list", "feature").stdout)
+        self.assertEqual(
+            self.command("rev-parse", "feature").stdout,
+            self.command("rev-parse", "origin/feature").stdout,
+        )
+
+    def test_browser_failure_preserves_created_pr_branch(self):
+        self.commit("Feature")
+        self.env["OPENER_FAIL"] = "1"
+        self.assertNotEqual(self.command("submitpr", check=False).returncode, 0)
+        self.assertTrue(self.command("branch", "--list", "feature").stdout)
+        self.assertEqual(
+            self.command("rev-parse", "feature").stdout,
+            self.command("rev-parse", "origin/feature").stdout,
+        )
+
+    def test_manual_cleanup_uses_fork(self):
+        self.command("init", "--bare", str(self.root / "fork"))
+        self.command("remote", "add", "mine", str(self.root / "fork"))
+        self.commit("Feature")
+        self.command("submitpr")
+        self.command("pilecleanupremotebranch", "HEAD")
+        self.assertEqual(
+            self.command("ls-remote", "mine", "refs/heads/feature").stdout, ""
+        )
+        self.assertFalse(self.command("branch", "--list", "feature").stdout)
+
+    def test_manual_cleanup_preserves_changed_remote_and_local_branch(self):
+        self.commit("Feature")
+        self.command("submitpr")
+        self.command("push", "--force", "origin", "main^:feature")
+        self.assertNotEqual(
+            self.command("pilecleanupremotebranch", "HEAD", check=False).returncode, 0
+        )
+        self.assertTrue(self.command("branch", "--list", "feature").stdout)
+        self.assertTrue(
+            self.command("ls-remote", "origin", "refs/heads/feature").stdout
         )
 
     def test_onto_recreates_missing_branch(self):

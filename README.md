@@ -48,6 +48,11 @@ $ git submitpr
 Once you submit a PR you are free to move on and start working on other
 changes while still on the main branch.
 
+Failed submissions automatically delete the remote branch they created,
+provided it still points to the pushed commit. Cleanup uses the remote
+that received the push, including `mine` for forks. Existing remote
+branches are never overwritten by `git submitpr`.
+
 #### Options
 
 - You can pass a different sha for submitting a PR for an older commit
@@ -261,13 +266,6 @@ parallel, using up to four of its allocated build cores.
 - Set `GIT_PILE_USE_PR_TEMPLATE` in your shell environment if you'd like
   `git-pile` to attempt to prefill the description of your PR with the [PR
   template][template] file if it exists.
-- Run `git config --global pile.cleanupRemoteOnSubmitFailure true` to
-  automatically delete remote branches that mirror your local branch
-  when submitting the PR fails. This makes it easier to run `git
-  submitpr` again in the case you had a networking issue that causes the
-  submission to fail. This is off by default to avoid potentially
-  deleting a remote branch that somehow has commits that aren't on the
-  local branch.
 
 [template]: https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/creating-a-pull-request-template-for-your-repository
 

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import URLError
@@ -88,22 +89,56 @@ def ask(prompt):
 
 
 @contextmanager
-def checkout(branch, *, submitting=False):
+def checkout(branch):
     path = worktree_path()
-    success = False
     try:
         if path.is_dir():
             git("switch", "--quiet", branch, cwd=path)
         else:
             git("worktree", "add", "--quiet", "--force", str(path), branch)
         yield path
-        success = True
     finally:
         if path.is_dir():
-            if submitting:
-                git("cherry-pick", "--abort", cwd=path, silent=True, check=False)
             git("switch", "--detach", "--quiet", cwd=path, check=False)
-        if submitting and not success:
+
+
+@dataclass
+class Submission:
+    path: Path
+    commit: str | None = None
+    created: bool = False
+
+
+@contextmanager
+def submission_checkout(branch, remote):
+    submission = Submission(worktree_path())
+    try:
+        with checkout(branch) as path:
+            submission.path = path
+            try:
+                yield submission
+            finally:
+                if not submission.created:
+                    git("cherry-pick", "--abort", cwd=path, silent=True, check=False)
+                    if submission.commit:
+                        result = git(
+                            "push",
+                            "--quiet",
+                            "--no-verify",
+                            f"--force-with-lease=refs/heads/{branch}:{submission.commit}",
+                            remote,
+                            f":refs/heads/{branch}",
+                            cwd=path,
+                            check=False,
+                        )
+                        if result.returncode:
+                            print(
+                                f"warning: could not clean up '{remote}/{branch}'; "
+                                "the remote branch may still exist",
+                                file=sys.stderr,
+                            )
+    finally:
+        if not submission.created:
             git("branch", "-D", branch, check=False)
 
 
@@ -235,23 +270,24 @@ def submitpr(args):
         "rev-parse", "--abbrev-ref", "--symbolic-full-name", upstream
     ).split("/", 1)[1]
     git("branch", "--no-track", branch, upstream)
-    with checkout(branch, submitting=True) as path:
+    fork = (
+        git("remote", "get-url", "mine", silent=True, check=False).returncode == 0
+    )
+    remote = "mine" if fork else "origin"
+    with submission_checkout(branch, remote) as submission:
+        path = submission.path
         cherry_pick(path, commit)
-        fork = (
-            git(
-                "remote", "get-url", "mine", cwd=path, silent=True, check=False
-            ).returncode
-            == 0
-        )
         git(
             "push",
             "--no-verify",
             "--quiet",
             "--set-upstream",
-            "mine" if fork else "origin",
-            branch,
+            f"--force-with-lease=refs/heads/{branch}:",
+            remote,
+            f"HEAD:refs/heads/{branch}",
             cwd=path,
         )
+        submission.commit = output("rev-parse", "HEAD", cwd=path)
         if gitlab:
             create_args = [
                 "--yes",
@@ -283,9 +319,8 @@ def submitpr(args):
                 check=False,
             )
             if result.returncode:
-                if config("pile.cleanupRemoteOnSubmitFailure"):
-                    cleanup_remote_branch(branch)
                 fail("failed to create merge request")
+            submission.created = True
             print(result.stdout, end="")
             return
         body_args = ["--fill"]
@@ -318,9 +353,8 @@ def submitpr(args):
             check=False,
         )
         if result.returncode:
-            if config("pile.cleanupRemoteOnSubmitFailure"):
-                cleanup_remote_branch(branch)
             fail("failed to create PR")
+        submission.created = True
         url = result.stdout.strip()
         if options.merge:
             result = run(
@@ -536,7 +570,18 @@ def cleanup_remote_branch(branch):
     if not exists(branch):
         fail(f"branch named '{branch}' does not exist")
     path = worktree_path()
-    git("push", "--quiet", "--delete", "origin", branch, cwd=path, check=False)
+    upstream = output(
+        "rev-parse", "--abbrev-ref", "--symbolic-full-name", branch + "@{upstream}"
+    )
+    remote, remote_branch = upstream.split("/", 1)
+    commit = output("rev-parse", branch)
+    git(
+        "push",
+        "--quiet",
+        f"--force-with-lease=refs/heads/{remote_branch}:{commit}",
+        remote,
+        f":refs/heads/{remote_branch}",
+    )
     git("switch", "--detach", "--quiet", cwd=path)
     git("branch", "-D", branch)
 
