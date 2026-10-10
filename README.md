@@ -273,8 +273,9 @@ parallel, using up to four of its allocated build cores.
 
 ### GitLab support
 
-- You can use `git-pile` with GitLab. Enable GitLab mode by running
- `git config pile.gitlabModeEnabled true`.
+- GitLab is detected automatically from the origin remote, including self-hosted
+  instances. Install `glab` and authenticate with `glab auth login` to create merge
+  requests.
 
 ## Advanced usage
 

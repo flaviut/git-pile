@@ -31,6 +31,7 @@
           runtimeInputs = with pkgs; [
             fzy
             gh
+            glab
             git
             python3
           ];

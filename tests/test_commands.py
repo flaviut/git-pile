@@ -1,13 +1,16 @@
 """Exercise the CLI against isolated repositories and a local bare remote."""
 
 import hashlib
+import io
 import importlib.util
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -43,6 +46,15 @@ class RepositoryTestCase(unittest.TestCase):
             "    else: print('[]')\n"
         )
         gh.chmod(0o755)
+        glab = fake_bin / "glab"
+        glab.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "with open(os.environ['GLAB_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "if os.environ.get('GLAB_FAIL'): sys.exit(1)\n"
+            "print('https://gitlab.example.com/team/repo/-/merge_requests/1')\n"
+        )
+        glab.chmod(0o755)
         for opener in ("open", "xdg-open"):
             script = fake_bin / opener
             script.write_text(f"#!{sys.executable}\n")
@@ -51,7 +63,7 @@ class RepositoryTestCase(unittest.TestCase):
             **{
                 key: value
                 for key, value in os.environ.items()
-                if not key.startswith(("GIT_", "GH_"))
+                if not key.startswith(("GIT_", "GH_", "GLAB_"))
             },
             "HOME": str(self.home),
             "PATH": os.pathsep.join((str(fake_bin), str(BIN), os.environ["PATH"])),
@@ -60,6 +72,7 @@ class RepositoryTestCase(unittest.TestCase):
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_EDITOR": "true",
             "GH_LOG": str(self.root / "gh.log"),
+            "GLAB_LOG": str(self.root / "glab.log"),
         }
         self.command("init", "--bare", str(self.root / "origin"))
         self.command("init", "-b", "main")
@@ -92,6 +105,74 @@ class RepositoryTestCase(unittest.TestCase):
 
 
 class Commands(RepositoryTestCase):
+    def test_automatic_gitlab_submission_and_open(self):
+        class GitLabHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'<meta content="GitLab" property="og:site_name">')
+
+            def log_message(self, *args):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), GitLabHandler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                origin = f"http://127.0.0.1:{server.server_port}/team/repo.git"
+                self.command("remote", "set-url", "origin", origin)
+                self.command(
+                    "remote", "set-url", "--push", "origin", str(self.root / "origin")
+                )
+                self.commit("Feature\n\nMerge request description")
+                self.command("submitpr", "HEAD", "--draft", "--merge-squash")
+                self.command("openpr")
+            finally:
+                server.shutdown()
+                thread.join()
+        calls = [
+            json.loads(line)
+            for line in (self.root / "glab.log").read_text().splitlines()
+        ]
+        self.assertEqual(calls[0][:2], ["mr", "create"])
+        for arg in (
+            "--draft",
+            "--yes",
+            "--auto-merge",
+            "--squash-before-merge=true",
+            "Feature",
+            "Merge request description",
+            origin,
+            "feature",
+            "main",
+        ):
+            self.assertIn(arg, calls[0])
+        self.assertEqual(calls[1], ["mr", "view", "feature", "--web", "--repo", origin])
+        self.assertFalse((self.root / "gh.log").exists())
+        self.assertEqual(
+            self.command(
+                "rev-parse", "--abbrev-ref", "feature@{upstream}"
+            ).stdout.strip(),
+            "origin/feature",
+        )
+
+    def test_gitlab_fork_and_failure(self):
+        origin = "https://gitlab.com/team/repo.git"
+        self.command("remote", "set-url", "origin", origin)
+        self.command("init", "--bare", str(self.root / "fork"))
+        self.command("remote", "add", "mine", str(self.root / "fork"))
+        self.commit("Feature")
+        self.command("submitpr", "--draft")
+        call = json.loads((self.root / "glab.log").read_text().splitlines()[0])
+        self.assertEqual(call[call.index("--head") + 1], str(self.root / "fork"))
+        self.assertEqual(call[call.index("--repo") + 1], origin)
+        self.commit("Second", "second.txt")
+        self.env["GLAB_FAIL"] = "1"
+        result = self.command("submitpr", check=False)
+        self.assertIn("failed to create merge request", result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.command("branch", "--list", "second").stdout)
+
     def test_branch_names(self):
         self.commit("...Mixed Case.lock")
         self.assertEqual(
@@ -357,32 +438,48 @@ class Commands(RepositoryTestCase):
 
 
 class Helpers(unittest.TestCase):
-    def test_gitlab_submission_url(self):
+    def test_gitlab_detection(self):
         for origin in (
             "git@git.gitlab.example.com:team/repo.git",
             "https://gitlab.example.com/team/repo.git",
+            "ssh://git@invent.kde.org:2222/frameworks/baloo.git",
         ):
             with (
                 self.subTest(origin=origin),
-                patch.object(pile, "config", return_value=True),
-                patch.object(
-                    pile, "output", side_effect=[origin, "sha", "origin/main"]
-                ),
-                patch.object(pile, "branch_name", return_value="person/feature"),
-                patch.object(pile, "exists", return_value=False),
-                patch.object(pile, "git"),
-                patch.object(pile, "checkout") as checkout,
-                patch.object(pile, "cherry_pick"),
-                patch.object(pile, "native_open") as opener,
+                patch.object(pile, "output", return_value=origin),
+                patch.object(pile, "urlopen") as request,
             ):
-                checkout.return_value.__enter__.return_value = Path("/unused")
-                pile.submitpr([])
-                self.assertEqual(
-                    opener.call_args.args[0],
-                    "https://gitlab.example.com/team/repo/-/merge_requests/new?"
-                    "merge_request%5Bsource_branch%5D=person%2Ffeature&"
-                    "merge_request%5Btarget_branch%5D=main",
+                request.return_value.__enter__.return_value = io.BytesIO(
+                    b'<meta content="GitLab" property="og:site_name">'
                 )
+                self.assertTrue(pile.gitlab_repository())
+                self.assertTrue(request.call_args.args[0].startswith("https://"))
+
+    def test_known_hosts_skip_detection_request(self):
+        for origin, expected in (
+            ("git@github.com:team/repo.git", False),
+            ("https://gitlab.com/team/repo.git", True),
+            ("/local/repo", False),
+        ):
+            with (
+                self.subTest(origin=origin),
+                patch.object(pile, "output", return_value=origin),
+                patch.object(pile, "urlopen") as request,
+            ):
+                self.assertEqual(pile.gitlab_repository(), expected)
+                request.assert_not_called()
+
+    def test_detection_failure_happens_before_submission(self):
+        with (
+            patch.object(
+                pile, "output", return_value="https://forge.example/team/repo.git"
+            ),
+            patch.object(pile, "urlopen", side_effect=OSError("offline")),
+            patch.object(pile, "git") as git,
+        ):
+            with self.assertRaisesRegex(SystemExit, "Cannot detect hosting service"):
+                pile.submitpr([])
+            git.assert_not_called()
 
     def test_prompt_eof_declines(self):
         with patch("builtins.input", side_effect=EOFError):

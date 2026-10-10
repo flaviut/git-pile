@@ -9,8 +9,11 @@ import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
+from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.error import URLError
+from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 
 def run(*args, cwd=None, capture=False, check=True, silent=False, env=None):
@@ -138,6 +141,37 @@ def native_open(url, path):
     print(f"PR is created at {url}")
 
 
+class GitLabPage(HTMLParser):
+    gitlab = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "meta" and attrs.get("property") == "og:site_name":
+            self.gitlab = attrs.get("content") == "GitLab"
+
+
+def gitlab_repository():
+    origin = output("remote", "get-url", "origin")
+    match = re.fullmatch(r"(?:[^@/:]+@)?([^/:]+):(?!//)(.+)", origin)
+    if match:
+        origin = f"https://{match[1]}/{match[2]}"
+    parsed = urlsplit(origin)
+    if parsed.scheme == "ssh":
+        origin = f"https://{parsed.hostname}{parsed.path}"
+        parsed = urlsplit(origin)
+    if parsed.hostname == "gitlab.com":
+        return True
+    if parsed.hostname == "github.com" or parsed.scheme not in ("http", "https"):
+        return False
+    try:
+        with urlopen(origin.removesuffix(".git"), timeout=10) as response:
+            page = GitLabPage()
+            page.feed(response.read(1024 * 1024).decode("utf-8", errors="replace"))
+            return page.gitlab
+    except (URLError, OSError, ValueError):
+        fail("Cannot detect hosting service for origin")
+
+
 def submitpr(args):
     parser = argparse.ArgumentParser(prog="git submitpr", allow_abbrev=False)
     # Only consume a leading commit, leaving gh's option values untouched.
@@ -154,18 +188,12 @@ def submitpr(args):
             dest="merge",
         )
     options, pr_args = parser.parse_known_args(args)
-    gitlab = config("pile.gitlabModeEnabled")
-    gitlab_url = None
-    if gitlab:
-        origin = output("remote", "get-url", "origin").removesuffix(".git")
-        match = re.fullmatch(r"git@(?:git\.)?([^:]+):(.+)", origin)
-        if match:
-            origin = f"https://{match[1]}/{match[2]}"
-        elif not origin.startswith("https://"):
-            fail("Cannot derive GitLab merge request URL from origin")
-        gitlab_url = origin + "/-/merge_requests/new"
-    elif not shutil.which("gh"):
-        fail("missing gh, install here: https://cli.github.com")
+    gitlab = gitlab_repository()
+    cli = "glab" if gitlab else "gh"
+    if not shutil.which(cli):
+        fail(f"missing {cli}, install it before submitting")
+    if gitlab and options.merge == "--rebase":
+        fail("GitLab rebase merging must be configured in the project's merge settings")
     commit = output("rev-parse", commit_arg)
     branch = branch_name(commit)
     upstream = "@{upstream}"
@@ -224,18 +252,41 @@ def submitpr(args):
             branch,
             cwd=path,
         )
-        if gitlab_url:
-            native_open(
-                gitlab_url
-                + "?"
-                + urlencode(
-                    {
-                        "merge_request[source_branch]": branch,
-                        "merge_request[target_branch]": remote_branch,
-                    }
-                ),
-                path,
+        if gitlab:
+            create_args = [
+                "--yes",
+                "--title",
+                output("show", "-s", "--format=%s", "HEAD", cwd=path),
+                "--description",
+                output("show", "-s", "--format=%b", "HEAD", cwd=path),
+                "--repo",
+                output("remote", "get-url", "origin", cwd=path),
+                "--source-branch",
+                branch,
+                "--target-branch",
+                remote_branch,
+            ]
+            if fork:
+                create_args += ["--head", output("remote", "get-url", "mine", cwd=path)]
+            if options.merge:
+                create_args += ["--auto-merge"]
+                if options.merge == "--squash":
+                    create_args += ["--squash-before-merge=true"]
+            result = run(
+                "glab",
+                "mr",
+                "create",
+                *create_args,
+                *pr_args,
+                cwd=path,
+                capture=True,
+                check=False,
             )
+            if result.returncode:
+                if config("pile.cleanupRemoteOnSubmitFailure"):
+                    cleanup_remote_branch(branch)
+                fail("failed to create merge request")
+            print(result.stdout, end="")
             return
         body_args = ["--fill"]
         template = path / ".github" / "pull_request_template.md"
@@ -432,6 +483,17 @@ def openpr(args):
     parser = argparse.ArgumentParser(prog="git openpr")
     parser.add_argument("commit", nargs="?", default="HEAD")
     branch = branch_name(parser.parse_args(args).commit)
+    if gitlab_repository():
+        run(
+            "glab",
+            "mr",
+            "view",
+            branch,
+            "--web",
+            "--repo",
+            output("remote", "get-url", "origin"),
+        )
+        return
     url = run(
         "gh",
         "pr",
