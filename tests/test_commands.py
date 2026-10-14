@@ -280,6 +280,53 @@ class Commands(RepositoryTestCase):
             self.command("show", "feature:feature.txt").stdout, "absorbed update\n"
         )
 
+    def test_absorb_pull_conflict(self):
+        self._check_pull_conflict("true")
+
+    def test_absorb_merge_conflict(self):
+        self._check_pull_conflict("false")
+
+    def _check_pull_conflict(self, strategy):
+        self.command("config", "pull.rebase", strategy)
+        original = self.commit("Feature")
+        self.command("submitpr")
+        self.command("checkout", "-b", "remote-update", "feature")
+        remote = self.commit("Remote update", contents="remote\n")
+        self.command("push", "origin", "HEAD:feature")
+        self.command("checkout", "feature")
+        local = self.commit("Local update", contents="local\n")
+        self.command("checkout", "main")
+        (self.repo / "feature.txt").write_text("absorbed update\n")
+
+        result = self.command("absorb", "--squash", input="y\n", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CONFLICT", result.stdout)
+        self.assertNotIn("cannot switch branch", result.stderr)
+        self.assertIn("upstream pull failed", result.stderr)
+        self.assertEqual(self.command("rev-parse", "feature").stdout.strip(), local)
+        self.assertEqual(
+            self.command("ls-remote", "origin", "refs/heads/feature").stdout.split()[0],
+            remote,
+        )
+        self.assertEqual(
+            self.command("show", "HEAD:feature.txt").stdout, "absorbed update\n"
+        )
+        self.assertEqual(self.command("status", "--porcelain").stdout, "")
+        path = self.command("pileworktreepath").stdout.strip()
+        self.assertEqual(
+            self.command("-C", path, "status", "--porcelain").stdout, ""
+        )
+        self.command("-C", path, "switch", "feature")
+        self.command("-C", path, "switch", "--detach")
+
+        # Remove the divergent fixture commits so the saved update can be retried.
+        self.command("branch", "-f", "feature", original)
+        self.command("push", "--force", "origin", "feature")
+        self.command("updatepr", original, "--squash")
+        self.assertEqual(
+            self.command("show", "feature:feature.txt").stdout, "absorbed update\n"
+        )
+
     def test_absorb_without_pr_amends_head(self):
         original = self.commit("Feature")
         parent = self.command("rev-parse", "HEAD^").stdout

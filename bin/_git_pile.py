@@ -165,7 +165,13 @@ def fetch_updates(path, branch):
             "warning: upstream has new commits, would you like to pull those (or abort)? (y/n) "
         ):
             fail(f"not updating PR, checkout '{branch}', pull and try again")
-        git("pull", cwd=path)
+        try:
+            git("pull", cwd=path)
+        except subprocess.CalledProcessError:
+            # Pull can rebase or merge; abort before checkout detaches the worktree.
+            for operation in ("rebase", "merge"):
+                git(operation, "--abort", cwd=path, silent=True, check=False)
+            fail(f"upstream pull failed; reconcile '{branch}' and retry the PR update")
 
 
 def native_open(url, path):
