@@ -86,6 +86,21 @@ $ git updatepr abc123 # pass the sha of the local commit from the original the P
 
 This will push the new commit to the PR you created originally.
 
+Updates prepare the PR and rewritten pile in detached worktrees before
+pushing. If the remote branch changes during preparation, publication
+stops. Local branches advance together after publication; staged changes,
+working files, and their timestamps stay untouched.
+
+If preparation fails, scratch worktrees are discarded and the committed
+update remains in your pile. Reconcile the conflict using normal Git,
+then rerun `git updatepr` with the same target and options.
+
+If publication succeeds but local finalization fails, the prepared commits
+are retained under `refs/git-pile/`. Inspect the reported refs and use the
+printed Git commands to finish locally. If the publication outcome is
+unknown, verify the remote before applying those commands. This also
+applies to PR updates started by `git absorb` or `git headpr`.
+
 #### Options
 
 - Pass `--squash` to squash the new commit into the initial commit on
@@ -214,7 +229,7 @@ nix profile install .#git-pile
    (required for interactive commit selection in [`git-absorb`](#git-absorb)).
 
 The scripts use Python's standard library and invoke Git and the GitHub CLI;
-no Python packages need to be installed. Keep `bin/_git_pile.py` alongside
+no Python packages need to be installed. Keep `bin/_git_pile*.py` alongside
 the `bin/git-*` commands when copying them elsewhere.
 
 ### Development
@@ -365,13 +380,14 @@ comfortable with, you can `git switch` to the underlying branch that
 between the `git-pile` workflow and not, as long as you're aware of the
 potential for introducing conflicts you'll have to resolve later.
 
-Once the steps above have been done, all other commands like
-`git updatepr` follow steps similar to:
+`git updatepr` runs from your pile branch:
 
-1. Checkout the previously created branch in the worktree
-2. Cherry pick the new commit to the branch, squashing if requested (in
-   the case of conflicts, you resolve them as usual and run `git
-   cherry-pick --continue`)
-3. Push the new branch state to the remote
-4. Squash the new commit into the original commit on your main branch,
-   treating it as a single change.
+1. Fetch the PR branch and record its remote SHA.
+2. Prepare the updated PR and rewritten pile in separate detached worktrees.
+   Remote changes are integrated by rebasing, independently of `pull.rebase`.
+3. Push only if the remote still matches the recorded SHA.
+4. Advance both local branches in one ref transaction, provided neither moved.
+
+Preparation must preserve the pile's final tree. Finalization therefore
+leaves your index and working files untouched. Failed preparation discards
+the scratch worktrees; see [recovery](#git-updatepr) for failures after publication.

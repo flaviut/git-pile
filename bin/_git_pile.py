@@ -1,10 +1,8 @@
 """Shared implementation of git-pile's command-line tools."""
 
 import argparse
-import hashlib
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -16,76 +14,7 @@ from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-
-def run(*args, cwd=None, capture=False, check=True, silent=False, env=None):
-    if os.environ.get("GIT_PILE_VERBOSE"):
-        print("+ " + shlex.join(str(arg) for arg in args), file=sys.stderr)
-    return subprocess.run(
-        args,
-        cwd=cwd,
-        text=True,
-        check=check,
-        stdout=subprocess.PIPE if capture else subprocess.DEVNULL if silent else None,
-        stderr=subprocess.DEVNULL if silent else None,
-        env={**os.environ, **env} if env else None,
-    )
-
-
-def git(*args, **kwargs):
-    return run("git", *args, **kwargs)
-
-
-def output(*args, **kwargs):
-    return git(*args, capture=True, **kwargs).stdout.rstrip("\n")
-
-
-def fail(message):
-    raise SystemExit("error: " + message)
-
-
-def branch_name(ref):
-    if ref.startswith("-"):
-        fail(f"invalid ref starts with dash: {ref}")
-    name = output("show", "--no-patch", "--no-show-signature", "--format=%f", ref)
-    if not name:
-        fail(f"no branch found for ref: {ref}")
-    name = name.lower().lstrip(".")
-    if name.endswith(".lock"):
-        name = name[:-5] + "-lock"
-    return os.environ.get("GIT_PILE_PREFIX", "") + name
-
-
-def worktree_path():
-    # -z avoids Git's quoting of paths containing special characters.
-    first = output("worktree", "list", "--porcelain", "-z").split("\0", 1)[0]
-    root = first.removeprefix("worktree ")
-    digest = hashlib.md5(os.fsencode(root + "\n"), usedforsecurity=False).hexdigest()
-    return Path.home() / ".cache" / "git-pile" / digest
-
-
-def exists(branch):
-    return (
-        git(
-            "show-ref", "--verify", "--quiet", "refs/heads/" + branch, check=False
-        ).returncode
-        == 0
-    )
-
-
-def config(name):
-    return output("config", "--default", "false", "--type=bool", name) == "true"
-
-
-def ask(prompt):
-    while True:
-        try:
-            answer = input(prompt).strip().lower()
-        except EOFError:
-            return False
-        if answer in ("y", "yes"):
-            return True
-        if answer in ("n", "no", ""):
-            return False
+from _git_pile_git import ask, branch_name, exists, fail, git, output, run, worktree_path
 
 
 @contextmanager
@@ -373,66 +302,16 @@ def submitpr(args):
 
 
 def updatepr(args):
+    from _git_pile_update import UpdateGuard, UpdateMode, start_update
+
     parser = argparse.ArgumentParser(prog="git updatepr")
     parser.add_argument("target")
     parser.add_argument("--squash", action="store_true")
     parser.add_argument("--force", action="store_true")
     options = parser.parse_args(args)
-    os.environ["GIT_SEQUENCE_EDITOR"] = "true"
-    if git("show", branch_name("HEAD"), silent=True, check=False).returncode == 0:
-        if not options.force:
-            fail(
-                "a pull request exists for HEAD already, are you updating a PR onto another PR? Pass --force to ignore this check"
-            )
-        print(
-            "warning: a pull request exists for HEAD already, ignoring this check because --force was passed",
-            file=sys.stderr,
-        )
-    new_commit = output("rev-parse", "HEAD")
-    if exists(options.target):
-        branch = options.target
-        commit = output("rev-parse", "--verify", branch)
-    else:
-        commit = output("rev-parse", "--verify", options.target)
-        branch = branch_name(commit)
-        if not exists(branch):
-            fail(f"branch '{branch}' doesn't exist")
-    with checkout(branch) as path:
-        fetch_updates(path, branch)
-        cherry_pick(path, new_commit)
-        if options.squash:
-            git(
-                "commit",
-                "--quiet",
-                "--signoff",
-                "--no-verify",
-                "--amend",
-                "--fixup=HEAD~",
-                cwd=path,
-            )
-            git(
-                "rebase", "--quiet", "--interactive", "--autosquash", "HEAD~2", cwd=path
-            )
-        push_args = ["--force-with-lease"] if options.squash else []
-        if git("push", *push_args, "--quiet", cwd=path, check=False).returncode:
-            print(f"warning: failed to push '{branch}'", file=sys.stderr)
-        git(
-            "rebase",
-            "--quiet",
-            "--interactive",
-            "--autostash",
-            "--exec",
-            "git commit --signoff --no-verify --amend --fixup " + shlex.quote(commit),
-            new_commit + "^",
-        )
-        git(
-            "rebase",
-            "--quiet",
-            "--interactive",
-            "--autostash",
-            "--autosquash",
-            commit + "^",
-        )
+    mode = UpdateMode.SQUASH if options.squash else UpdateMode.APPEND
+    guard = UpdateGuard.FORCE if options.force else UpdateGuard.CHECK
+    start_update(options.target, mode, guard)
 
 
 def replacepr(args):

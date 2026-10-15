@@ -69,7 +69,7 @@
             installPhase = ''
               runHook preInstall
               mkdir -p "$out/bin"
-              cp bin/git-* bin/_git_pile.py "$out/bin/"
+              cp bin/git-* bin/_git_pile*.py "$out/bin/"
               chmod +x "$out/bin/"git-*
               for script in "$out/bin/"git-*; do
                 wrapProgram "$script" --prefix PATH : ${pkgs.lib.makeBinPath runtimeInputs}
