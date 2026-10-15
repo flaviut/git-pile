@@ -6,6 +6,8 @@ import subprocess
 import sys
 
 from _git_pile import branch_name, exists, git
+from _git_pile_git import restore_absorb
+from _git_pile_update import UpdateAborted, UpdateGuard, UpdateMode, start_update
 
 RED = "\033[91m"
 RESET = "\033[0m"
@@ -142,6 +144,9 @@ def _main(squash: bool, commit_args: list[str]) -> None:
     else:
         selected_sha = matching_shas.pop()
 
+    original_head = _run_git_command(["rev-parse", "HEAD"])
+    original_index = _run_git_command(["write-tree"])
+
     if stage_first:
         _run_git_command(["add"] + changed_files)
 
@@ -158,22 +163,29 @@ def _main(squash: bool, commit_args: list[str]) -> None:
         )
         return
 
+    original_ref = _run_git_command(["symbolic-ref", "--quiet", "HEAD"])
     args = commit_args
     if squash:
         args.extend(["-m", "ignore, will be squashed", "-s"])
 
     code = subprocess.Popen(["git", "commit", "--quiet"] + args).wait()
     if code != 0:
+        git("read-tree", original_index)
         raise SystemExit("error: failed to commit, not updating PR")
 
-    update_command = ["git", "updatepr", selected_sha]
-    if squash:
-        update_command.append("--squash")
-
+    committed = _run_git_command(["rev-parse", "HEAD"])
+    mode = UpdateMode.SQUASH if squash else UpdateMode.APPEND
     try:
-        subprocess.check_call(update_command)
-    except subprocess.CalledProcessError:
-        sys.exit(1)
+        start_update(selected_sha, mode, UpdateGuard.CHECK)
+    except UpdateAborted:
+        restore_absorb(original_ref, original_head, original_index, committed)
+        raise
+    except subprocess.CalledProcessError as error:
+        sys.exit(error.returncode)
+    except OSError as error:
+        sys.exit("error: " + str(error))
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 if __name__ == "__main__":

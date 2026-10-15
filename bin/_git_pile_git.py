@@ -118,6 +118,17 @@ def update_refs(updates, cwd=None):
     )
 
 
+def restore_absorb(ref, head, index, committed):
+    current = git("symbolic-ref", "--quiet", "HEAD", capture=True, check=False)
+    if current.stdout.strip() != ref:
+        fail("pile changed branches; keeping the absorb commit")
+    if git("update-ref", ref, head, committed, check=False).returncode:
+        fail("pile moved; keeping the absorb commit")
+
+    # Restore staging without rewriting files, including partially staged edits.
+    git("read-tree", index)
+
+
 def config(name):
     return output("config", "--default", "false", "--type=bool", name) == "true"
 

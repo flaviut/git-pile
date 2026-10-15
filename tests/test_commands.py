@@ -296,39 +296,139 @@ class Commands(RepositoryTestCase):
         path.write_text("#!/bin/sh\nset -e\n" + body)
         path.chmod(0o755)
 
-    def test_absorb_sync_conflict(self):
+    def test_absorb_stale_pr_branch(self):
         original = self.commit("Feature")
         self.command("submitpr")
-        self.command("checkout", "-b", "remote-update", "feature")
-        remote = self.commit("Remote update", contents="remote\n")
-        self.command("push", "origin", "HEAD:feature")
-        self.command("checkout", "feature")
-        local = self.commit("Local update", contents="local\n")
+        self.command("checkout", "-b", "remote-update", "origin/main")
+        self.commit("New upstream", "upstream.txt", "upstream\n")
+        self.command("push", "origin", "HEAD:main")
+        self.command("cherry-pick", original)
+        self.command("push", "--force", "origin", "HEAD:feature")
         self.command("checkout", "main")
-        self.command("config", "pull.rebase", "false")
+        self.command("rebase", "origin/main")
         (self.repo / "feature.txt").write_text("absorbed update\n")
 
-        result = self.command("absorb", "--squash", input="y\n", check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("CONFLICT", result.stdout)
-        self.assertNotIn("cannot switch branch", result.stderr)
-        self.assertEqual(self.command("rev-parse", "feature").stdout.strip(), local)
-        self.assertEqual(
-            self.command("rev-parse", "origin/feature").stdout.strip(), remote
-        )
-        self.assertEqual(
-            self.command("show", "HEAD:feature.txt").stdout, "absorbed update\n"
-        )
-        self.assertEqual(self.command("status", "--porcelain").stdout, "")
-        self._check_scratch()
-        self.assertEqual(self.command("for-each-ref", "refs/git-pile/").stdout, "")
-
-        self.command("branch", "-f", "feature", original)
-        self.command("push", "--force", "origin", "feature")
-        self.command("updatepr", original, "--squash")
+        result = self.command("absorb", "--squash")
+        self.assertNotIn("Upstream changed", result.stdout)
+        self.assertNotIn("diff --git", result.stdout)
         self.assertEqual(
             self.command("show", "feature:feature.txt").stdout, "absorbed update\n"
         )
+        self.assertEqual(
+            self.command("rev-parse", "feature^").stdout,
+            self.command("rev-parse", "origin/main").stdout,
+        )
+        self.assertEqual(self.command("status", "--porcelain").stdout, "")
+        self._check_scratch()
+
+    def test_absorb_sync_conflict(self):
+        original = self.commit("Feature")
+        self.command("submitpr")
+        branch = self.command("rev-parse", "feature").stdout.strip()
+        self.command("checkout", "-b", "remote-update", "feature")
+        remote = self.commit("Remote update", contents="remote\n")
+        self.command("push", "origin", "HEAD:feature")
+        self.command("checkout", "main")
+        (self.repo / "feature.txt").write_text("absorbed update\n")
+        before = self.command("diff").stdout
+
+        result = self.command("absorb", "--squash", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CONFLICT", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.command("rev-parse", "HEAD").stdout.strip(), original)
+        self.assertEqual(self.command("rev-parse", "feature").stdout.strip(), branch)
+        self.assertEqual(
+            self.command("rev-parse", "origin/feature").stdout.strip(), remote
+        )
+        self.assertEqual(self.command("diff").stdout, before)
+        self.assertEqual(self.command("diff", "--cached").stdout, "")
+        self._check_scratch()
+        self.assertEqual(self.command("for-each-ref", "refs/git-pile/").stdout, "")
+
+        self.command("push", "--force", "origin", "feature")
+        self.command("absorb", "--squash")
+        self.assertEqual(
+            self.command("show", "feature:feature.txt").stdout, "absorbed update\n"
+        )
+
+    def test_absorb_rejected_push(self):
+        original = self.commit("Feature")
+        self.command("submitpr")
+        branch = self.command("rev-parse", "feature").stdout.strip()
+        (self.repo / "feature.txt").write_text("staged\n")
+        self.command("add", "feature.txt")
+        (self.repo / "feature.txt").write_text("unstaged\n")
+        cached = self.command("diff", "--cached").stdout
+        unstaged = self.command("diff").stdout
+        hook = self.root / "origin" / "hooks" / "pre-receive"
+        self._hook(hook, "exit 1\n")
+
+        result = self.command("absorb", "--squash", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.command("rev-parse", "HEAD").stdout.strip(), original)
+        self.assertEqual(self.command("diff", "--cached").stdout, cached)
+        self.assertEqual(self.command("diff").stdout, unstaged)
+        self.assertEqual(self.command("rev-parse", "feature").stdout.strip(), branch)
+        self.assertEqual(self.command("for-each-ref", "refs/git-pile/").stdout, "")
+        self._check_scratch()
+
+    def test_absorb_commit_failure(self):
+        original = self.commit("Feature")
+        self.command("submitpr")
+        (self.repo / "feature.txt").write_text("updated\n")
+        before = self.command("diff").stdout
+        self._hook(self.repo / ".git" / "hooks" / "pre-commit", "exit 1\n")
+
+        result = self.command("absorb", "--squash", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.command("rev-parse", "HEAD").stdout.strip(), original)
+        self.assertEqual(self.command("diff").stdout, before)
+        self.assertEqual(self.command("diff", "--cached").stdout, "")
+
+    def test_absorb_published_recovery(self):
+        original = self.commit("Feature")
+        self.command("submitpr")
+        branch = self.command("rev-parse", "feature").stdout.strip()
+        (self.repo / "feature.txt").write_text("updated\n")
+        base = self.command("rev-parse", "origin/main").stdout.strip()
+        self._hook(
+            self.repo / ".git" / "hooks" / "pre-push",
+            f"git update-ref refs/heads/feature {base}\n",
+        )
+
+        result = self.command("absorb", "--squash", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PR published; local finalization failed", result.stderr)
+        self.assertNotEqual(self.command("rev-parse", "HEAD").stdout.strip(), original)
+        self.assertEqual(self.command("show", "HEAD:feature.txt").stdout, "updated\n")
+        self.assertEqual(
+            len(self.command("for-each-ref", "refs/git-pile/").stdout.splitlines()), 2
+        )
+        self._check_scratch()
+        self.command("update-ref", "refs/heads/feature", branch, base)
+        self._recover_refs(result)
+        self.assertEqual(self.command("show", "feature:feature.txt").stdout, "updated\n")
+
+    def test_absorb_unknown_publication(self):
+        original = self.commit("Feature")
+        self.command("submitpr")
+        (self.repo / "feature.txt").write_text("updated\n")
+        self._hook(
+            self.repo / ".git" / "hooks" / "pre-push",
+            "git config remote.origin.uploadpack false\nexit 1\n",
+        )
+
+        result = self.command("absorb", "--squash", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Publication outcome unknown", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotEqual(self.command("rev-parse", "HEAD").stdout.strip(), original)
+        self.assertEqual(self.command("show", "HEAD:feature.txt").stdout, "updated\n")
+        self.assertEqual(
+            len(self.command("for-each-ref", "refs/git-pile/").stdout.splitlines()), 2
+        )
+        self._check_scratch()
 
     def test_update_busy_branch(self):
         original = self.commit("Feature", "base.txt", "feature\n")

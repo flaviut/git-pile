@@ -9,7 +9,6 @@ from enum import Enum
 from pathlib import Path
 
 from _git_pile_git import (
-    ask,
     branch_busy,
     branch_name,
     check_idle,
@@ -51,7 +50,27 @@ def _pile_target(target, branch, head):
     return matches[0]
 
 
-def start_update(target, mode, guard):
+class UpdateAborted(SystemExit):
+    pass
+
+
+@contextmanager
+def _unpublished():
+    try:
+        yield
+    except subprocess.CalledProcessError:
+        raise UpdateAborted(
+            "error: preparation failed; reconcile your pile or PR branch and retry"
+        ) from None
+    except SystemExit as error:
+        raise UpdateAborted(error.code) from None
+    except OSError as error:
+        raise UpdateAborted("error: " + str(error)) from None
+    except KeyboardInterrupt:
+        raise UpdateAborted(130) from None
+
+
+def _update_plan(target, guard):
     source = output("rev-parse", "--show-toplevel")
     check_idle(source)
     source_ref = git("symbolic-ref", "--quiet", "HEAD", capture=True, check=False)
@@ -81,16 +100,18 @@ def start_update(target, mode, guard):
         "remote_ref": upstream[1],
     }
     _check_refs(plan)
+    return plan
+
+
+def start_update(target, mode, guard):
+    with _unpublished():
+        plan = _update_plan(target, guard)
     with _scratch() as root:
         prefix = "refs/git-pile/" + root.name
-        try:
+        with _unpublished():
             pr = _prepare_pr(plan, mode, root / "pr", prefix)
             pile = _prepare_pile(plan, root / "pile")
-        except subprocess.CalledProcessError:
-            fail(
-                "preparation failed; reconcile your pile or PR branch, then rerun git updatepr"
-            )
-        _check_refs(plan)
+            _check_refs(plan)
         _finish(plan, pr, pile, prefix)
 
 
@@ -136,12 +157,8 @@ def _prepare_pr(plan, mode, path, prefix):
         plan["remote_ref"] + ":" + prefix + "/upstream",
     )
     plan["remote_head"] = output("rev-parse", prefix + "/upstream")
-    git("worktree", "add", "--quiet", "--detach", str(path), plan["branch_head"])
-    if not _ancestor(plan["remote_head"], plan["branch_head"]):
-        git("diff", plan["branch_head"] + "..." + plan["remote_head"])
-        if not ask("Upstream changed. Rebase the prepared PR onto it? [y/N]: "):
-            fail("upstream update declined")
-        _rebase(path, plan["remote_head"])
+    # PR branches cache published history; force-pushes can leave that cache stale.
+    git("worktree", "add", "--quiet", "--detach", str(path), plan["remote_head"])
     previous = output("rev-parse", "HEAD", cwd=path)
     git("cherry-pick", plan["head"], cwd=path)
     if mode is UpdateMode.SQUASH:
@@ -218,13 +235,14 @@ def _finish(plan, pr, pile, prefix):
         (plan["source_ref"], pile, plan["head"]),
     ]
     pins = [prefix + "/pr", prefix + "/pile"]
-    update_refs([(pins[0], pr, None), (pins[1], pile, None)])
+    with _unpublished():
+        update_refs([(pins[0], pr, None), (pins[1], pile, None)])
     keep = True
     message = "Publication outcome unknown; inspect the remote before local recovery."
     try:
         if not _push(plan, pr):
             keep = False
-            fail("publication failed; local branches are unchanged")
+            raise UpdateAborted("error: publication failed; local branches are unchanged")
         message = "PR published; local finalization failed."
         _check_refs(plan)
         update_refs(updates, cwd=plan["source"])

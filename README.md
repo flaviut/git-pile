@@ -93,7 +93,9 @@ working files, and their timestamps stay untouched.
 
 If preparation fails, scratch worktrees are discarded and the committed
 update remains in your pile. Reconcile the conflict using normal Git,
-then rerun `git updatepr` with the same target and options.
+then rerun `git updatepr` with the same target and options. For `git absorb`,
+a failed preparation or rejected publication restores the original HEAD and
+staging, preserving your working files.
 
 If publication succeeds but local finalization fails, the prepared commits
 are retained under `refs/git-pile/`. Inspect the reported refs and use the
@@ -317,9 +319,8 @@ are 2 important things to note:
 - When you `git pull` you might have conflicts with your local commit,
   and it won't disappear cleanly. In this case I often `git rebase
   --skip` and accept the remote commit instead.
-- If you want to push more changes to the same PR locally `git updatepr`
-  will identify that changes were made on the upstream branch, and
-  confirm that you want to pull them before pushing your own changes.
+- `git updatepr` applies your update to the fetched PR head, preserving
+  edits made on GitHub without a synchronization prompt.
 
 ### Conflicting changes
 
@@ -384,7 +385,7 @@ potential for introducing conflicts you'll have to resolve later.
 
 1. Fetch the PR branch and record its remote SHA.
 2. Prepare the updated PR and rewritten pile in separate detached worktrees.
-   Remote changes are integrated by rebasing, independently of `pull.rebase`.
+   Apply the update to the fetched PR head; the local PR branch may be stale.
 3. Push only if the remote still matches the recorded SHA.
 4. Advance both local branches in one ref transaction, provided neither moved.
 
