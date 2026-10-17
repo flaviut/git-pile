@@ -40,6 +40,9 @@ class RepositoryTestCase(unittest.TestCase):
             "with open(os.environ['GH_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
             "if sys.argv[1:3] == ['pr', 'create']:\n"
             "    if os.environ.get('GH_ADVANCE_REMOTE'): subprocess.run(['git', 'push', '--force', 'origin', 'main^:refs/heads/feature'], check=True)\n"
+            "    if os.environ.get('GH_CHECK_DEFAULTS') and ('--title' not in sys.argv or '--body' not in sys.argv):\n"
+            "        base = sys.argv[sys.argv.index('--base') + 1]\n"
+            "        subprocess.run(['git', 'log', f'origin/{base}...HEAD'], check=True, stdout=subprocess.DEVNULL)\n"
             "    if os.environ.get('GH_FAIL'): sys.exit(1)\n"
             "    print('https://github.com/example/repo/pull/1')\n"
             "elif sys.argv[1:3] == ['pr', 'merge']:\n"
@@ -801,6 +804,24 @@ class Commands(RepositoryTestCase):
         self.assertEqual(
             self.command("rev-list", "--count", "origin/main..third").stdout.strip(),
             "2",
+        )
+
+    def test_fork_onto_without_origin_ref(self):
+        self.command("init", "--bare", str(self.root / "fork"))
+        self.command("remote", "add", "mine", str(self.root / "fork"))
+        first = self.commit("First")
+        self.command("submitpr")
+        self.commit("Second\n\nSecond body", "second.txt", "second\n")
+        self.env["GH_CHECK_DEFAULTS"] = "1"
+
+        self.command("submitpr", "HEAD", "--draft", "--onto", first)
+
+        call = json.loads((self.root / "gh.log").read_text().splitlines()[-1])
+        self.assertEqual(call[call.index("--title") + 1], "Second")
+        self.assertEqual(call[call.index("--body") + 1], "Second body")
+        self.assertNotEqual(
+            self.command("rev-parse", "--verify", "origin/first", check=False).returncode,
+            0,
         )
 
     def test_failed_create_cleans_worktree(self):

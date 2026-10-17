@@ -274,7 +274,15 @@ def submitpr(args):
                 (body + "\n\n" if body else "") + template.read_text().rstrip("\n"),
             ]
         if fork:
-            body_args += ["--repo", output("remote", "get-url", "origin", cwd=path)]
+            # gh's defaults look for the base on origin, not the fork.
+            body_args = [
+                "--title",
+                output("show", "-s", "--format=%s", "HEAD", cwd=path),
+                "--body",
+                output("show", "-s", "--format=%b", "HEAD", cwd=path),
+                "--repo",
+                output("remote", "get-url", "origin", cwd=path),
+            ]
         result = run(
             "gh",
             "pr",
