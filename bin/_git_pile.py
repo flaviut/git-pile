@@ -201,9 +201,9 @@ def submitpr(args):
         fail(
             f"branch named '{branch}' already exists, maybe you've already created the PR for this commit?"
         )
-    remote_branch = output(
+    base_remote, remote_branch = output(
         "rev-parse", "--abbrev-ref", "--symbolic-full-name", upstream
-    ).split("/", 1)[1]
+    ).split("/", 1)
     git("branch", "--no-track", branch, upstream)
     fork = (
         git("remote", "get-url", "mine", silent=True, check=False).returncode == 0
@@ -274,14 +274,14 @@ def submitpr(args):
                 (body + "\n\n" if body else "") + template.read_text().rstrip("\n"),
             ]
         if fork:
-            # gh's defaults look for the base on origin, not the fork.
+            # The base may live on the fork rather than origin.
             body_args = [
                 "--title",
                 output("show", "-s", "--format=%s", "HEAD", cwd=path),
                 "--body",
                 output("show", "-s", "--format=%b", "HEAD", cwd=path),
                 "--repo",
-                output("remote", "get-url", "origin", cwd=path),
+                output("remote", "get-url", base_remote, cwd=path),
             ]
         result = run(
             "gh",

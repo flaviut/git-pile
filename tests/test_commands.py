@@ -244,7 +244,9 @@ class Commands(RepositoryTestCase):
         calls = [
             json.loads(line) for line in (self.root / "gh.log").read_text().splitlines()
         ]
-        self.assertIn("--repo", calls[0])
+        self.assertEqual(
+            calls[0][calls[0].index("--repo") + 1], str(self.root / "origin")
+        )
         self.assertIn("A custom title", calls[0])
         self.assertIn("--rebase", calls[1])
         self.assertEqual(
@@ -817,8 +819,15 @@ class Commands(RepositoryTestCase):
         self.command("submitpr", "HEAD", "--draft", "--onto", first)
 
         call = json.loads((self.root / "gh.log").read_text().splitlines()[-1])
+        self.assertEqual(call[call.index("--repo") + 1], str(self.root / "fork"))
         self.assertEqual(call[call.index("--title") + 1], "Second")
         self.assertEqual(call[call.index("--body") + 1], "Second body")
+
+        self.commit("Third", "third.txt", "third\n")
+        self.command("submitpr", "--base", "first")
+        call = json.loads((self.root / "gh.log").read_text().splitlines()[-1])
+        self.assertEqual(call[call.index("--repo") + 1], str(self.root / "fork"))
+        self.assertEqual(call[call.index("--base") + 1], "first")
         self.assertNotEqual(
             self.command("rev-parse", "--verify", "origin/first", check=False).returncode,
             0,
