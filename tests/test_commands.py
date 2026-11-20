@@ -40,9 +40,12 @@ class RepositoryTestCase(unittest.TestCase):
             "with open(os.environ['GH_LOG'], 'a') as f: f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
             "if sys.argv[1:3] == ['pr', 'create']:\n"
             "    if os.environ.get('GH_ADVANCE_REMOTE'): subprocess.run(['git', 'push', '--force', 'origin', 'main^:refs/heads/feature'], check=True)\n"
-            "    if os.environ.get('GH_CHECK_DEFAULTS') and ('--title' not in sys.argv or '--body' not in sys.argv):\n"
-            "        base = sys.argv[sys.argv.index('--base') + 1]\n"
-            "        subprocess.run(['git', 'log', f'origin/{base}...HEAD'], check=True, stdout=subprocess.DEVNULL)\n"
+            "    target = sys.argv[sys.argv.index('--repo') + 1] if '--repo' in sys.argv else 'origin'\n"
+            "    base = sys.argv[sys.argv.index('--base') + 1]\n"
+            "    refs = subprocess.check_output(['git', 'ls-remote', '--heads', target, f'refs/heads/{base}'], text=True)\n"
+            "    if not refs: sys.exit('base branch missing from target repository')\n"
+            "    commits = subprocess.check_output(['git', 'rev-list', f'{refs.split()[0]}..HEAD'], text=True)\n"
+            "    if not commits: sys.exit('no commits relative to target base')\n"
             "    if os.environ.get('GH_FAIL'): sys.exit(1)\n"
             "    print('https://github.com/example/repo/pull/1')\n"
             "elif sys.argv[1:3] == ['pr', 'merge']:\n"
@@ -85,7 +88,7 @@ class RepositoryTestCase(unittest.TestCase):
             "GH_LOG": str(self.root / "gh.log"),
             "GLAB_LOG": str(self.root / "glab.log"),
         }
-        self.command("init", "--bare", str(self.root / "origin"))
+        self.command("init", "--bare", "-b", "main", str(self.root / "origin"))
         self.command("init", "-b", "main")
         self.command("config", "user.name", "Test User")
         self.command("config", "user.email", "test@example.com")
@@ -215,9 +218,10 @@ class Commands(RepositoryTestCase):
             "Template text\n"
         )
         self.command("add", ".github")
+        self.command("commit", "-m", "Add PR template")
+        self.command("push", "origin", "main")
         self.commit("Feature")
         self.assertIn("Feature", self.command("missingprs").stdout)
-        self.env["GIT_PILE_USE_PR_TEMPLATE"] = "1"
         self.command("submitpr", "--draft", "--merge-squash")
         log = (self.root / "gh.log").read_text()
         self.assertIn("Template text", log)
@@ -808,30 +812,99 @@ class Commands(RepositoryTestCase):
             "2",
         )
 
-    def test_fork_onto_without_origin_ref(self):
+    def test_cumulative_draft(self):
         self.command("init", "--bare", str(self.root / "fork"))
         self.command("remote", "add", "mine", str(self.root / "fork"))
         first = self.commit("First")
         self.command("submitpr")
         self.commit("Second\n\nSecond body", "second.txt", "second\n")
-        self.env["GH_CHECK_DEFAULTS"] = "1"
-
-        self.command("submitpr", "HEAD", "--draft", "--onto", first)
-
-        call = json.loads((self.root / "gh.log").read_text().splitlines()[-1])
-        self.assertEqual(call[call.index("--repo") + 1], str(self.root / "fork"))
-        self.assertEqual(call[call.index("--title") + 1], "Second")
-        self.assertEqual(call[call.index("--body") + 1], "Second body")
-
-        self.commit("Third", "third.txt", "third\n")
-        self.command("submitpr", "--base", "first")
-        call = json.loads((self.root / "gh.log").read_text().splitlines()[-1])
-        self.assertEqual(call[call.index("--repo") + 1], str(self.root / "fork"))
-        self.assertEqual(call[call.index("--base") + 1], "first")
-        self.assertNotEqual(
-            self.command("rev-parse", "--verify", "origin/first", check=False).returncode,
-            0,
+        self.command("push", "origin", "origin/main:refs/heads/trunk")
+        self.command(
+            "--git-dir",
+            str(self.root / "origin"),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/trunk",
         )
+        head = self.command("rev-parse", "HEAD").stdout
+
+        self.command("submitpr", "HEAD", "--onto", first)
+
+        self.assertEqual(self.command("rev-parse", "HEAD").stdout, head)
+        self.assertEqual(
+            self.command(
+                "rev-list", "--count", "origin/main..mine/second"
+            ).stdout.strip(),
+            "2",
+        )
+        self.assertEqual(
+            self.command("rev-parse", "mine/second^").stdout,
+            self.command("rev-parse", "mine/first").stdout,
+        )
+        self.assertEqual(
+            self.command("show", "mine/second:feature.txt").stdout, "feature\n"
+        )
+        self.assertEqual(
+            self.command("show", "mine/second:second.txt").stdout, "second\n"
+        )
+        call = json.loads((self.root / "gh.log").read_text().splitlines()[-1])
+        self.assertEqual(call[call.index("--repo") + 1], str(self.root / "origin"))
+        self.assertEqual(call[call.index("--base") + 1], "trunk")
+        self.assertIn("--draft", call)
+        self.assertIn("first", call[call.index("--body") + 1])
+        self.assertIn("Second body", call[call.index("--body") + 1])
+
+        second = self.command("rev-parse", "HEAD").stdout.strip()
+        self.commit("Third", "third.txt", "third\n")
+        self.command("submitpr", "--onto", second, "--draft")
+        self.assertEqual(
+            self.command(
+                "rev-list", "--count", "origin/main..mine/third"
+            ).stdout.strip(),
+            "3",
+        )
+        call = json.loads((self.root / "gh.log").read_text().splitlines()[-1])
+        self.assertEqual(call.count("--draft"), 1)
+
+        self.commit("Fourth", "fourth.txt", "fourth\n")
+        self.command("submitpr", "--base", "first")
+        self.assertEqual(
+            self.command(
+                "rev-list", "--count", "origin/main..mine/fourth"
+            ).stdout.strip(),
+            "2",
+        )
+
+    def test_cumulative_merge_rejected(self):
+        self.command("init", "--bare", str(self.root / "fork"))
+        self.command("remote", "add", "mine", str(self.root / "fork"))
+        first = self.commit("First")
+        self.command("submitpr")
+        self.commit("Second", "second.txt", "second\n")
+        refs = self.command("show-ref").stdout
+        remote_refs = self.command("ls-remote", "mine").stdout
+
+        result = self.command("submitpr", "--onto", first, "--merge", check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cumulative PRs are drafts", result.stderr)
+        self.assertEqual(self.command("show-ref").stdout, refs)
+        self.assertEqual(self.command("ls-remote", "mine").stdout, remote_refs)
+
+    def test_fork_stack_with_origin_base(self):
+        self.command("init", "--bare", str(self.root / "fork"))
+        self.command("remote", "add", "mine", str(self.root / "fork"))
+        first = self.commit("First")
+        self.command("submitpr")
+        self.command("push", "origin", "first:refs/heads/first")
+        self.commit("Second", "second.txt", "second\n")
+
+        self.command("submitpr", "--onto", first)
+
+        self.assertTrue(self.command("ls-remote", "mine", "refs/heads/second").stdout)
+        call = json.loads((self.root / "gh.log").read_text().splitlines()[-1])
+        self.assertEqual(call[call.index("--repo") + 1], str(self.root / "origin"))
+        self.assertEqual(call[call.index("--base") + 1], "first")
 
     def test_failed_create_cleans_worktree(self):
         self.commit("Feature")

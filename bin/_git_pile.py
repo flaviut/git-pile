@@ -14,7 +14,17 @@ from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-from _git_pile_git import ask, branch_name, exists, fail, git, output, run, worktree_path
+from _git_pile_git import (
+    ask,
+    branch_name,
+    exists,
+    fail,
+    git,
+    output,
+    remote_head,
+    run,
+    worktree_path,
+)
 
 
 @contextmanager
@@ -142,6 +152,90 @@ def gitlab_repository():
         fail("Cannot detect hosting service for origin")
 
 
+def _fetch_pr_base():
+    base = output("config", "--default", "", "--get", "pile.prBase")
+    if not base:
+        return None
+    branch = base.removeprefix("origin/")
+    source = f"refs/heads/{branch}"
+    if not base.startswith("origin/") or git(
+        "check-ref-format", source, check=False
+    ).returncode:
+        fail("pile.prBase must name an origin branch, e.g. origin/IR")
+
+    target = f"refs/remotes/{base}"
+    git("fetch", "--quiet", "--no-tags", "origin", f"+{source}:{target}")
+    return branch, target
+
+
+def _upstream_template(head):
+    if git("cat-file", "-e", head, silent=True, check=False).returncode:
+        git("fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", head)
+
+    for directory in (".github", "", "docs"):
+        tree = f"{head}:{directory}" if directory else head
+        names = output(
+            "ls-tree",
+            "--full-tree",
+            "-z",
+            "--name-only",
+            tree,
+            silent=True,
+            check=False,
+        )
+        paths = {name.lower(): name for name in names.split("\0")}
+        for extension in ("md", "txt"):
+            name = paths.get(f"pull_request_template.{extension}")
+            if name:
+                prefix = f"{directory}/" if directory else ""
+                return output("cat-file", "blob", f"{head}:{prefix}{name}")
+    return ""
+
+
+def _github_options(args, origin_head):
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("-t", "--title")
+    body = parser.add_mutually_exclusive_group()
+    body.add_argument("-b", "--body")
+    body.add_argument("-F", "--body-file")
+    parser.add_argument("-T", "--template", type=Path)
+    options, pr_args = parser.parse_known_args(args)
+    template = ""
+    if options.body_file is not None and options.body_file != "-":
+        options.body_file = str(Path(options.body_file).absolute())
+    if options.body is None and options.body_file is None:
+        if options.template is not None:
+            try:
+                template = options.template.read_text().rstrip("\n")
+            except OSError as error:
+                fail(f"cannot read PR template: {error}")
+        elif head := origin_head or remote_head("origin"):
+            template = _upstream_template(head[1])
+    return options, pr_args, template
+
+
+def _github_args(prepared, remote, dependency, path):
+    options, args, template = prepared
+    explicit = remote == "mine" or dependency or template
+    if remote == "mine":
+        args = ["--repo", output("remote", "get-url", "origin"), *args]
+
+    title = options.title
+    if title is None and explicit:
+        title = output("show", "-s", "--format=%s", "HEAD", cwd=path)
+    if title is not None:
+        args += ["--title", title]
+
+    if options.body_file is not None:
+        args += ["--body-file", options.body_file]
+    elif options.body is not None:
+        args += ["--body", options.body]
+    elif explicit:
+        body = output("show", "-s", "--format=%b", "HEAD", cwd=path)
+        args += ["--body", "\n\n".join(filter(None, (body, template, dependency)))]
+    return args if explicit else ["--fill", *args]
+
+
 def submitpr(args):
     parser = argparse.ArgumentParser(prog="git submitpr", allow_abbrev=False)
     # Only consume a leading commit, leaving gh's option values untouched.
@@ -201,13 +295,49 @@ def submitpr(args):
         fail(
             f"branch named '{branch}' already exists, maybe you've already created the PR for this commit?"
         )
-    base_remote, remote_branch = output(
-        "rev-parse", "--abbrev-ref", "--symbolic-full-name", upstream
-    ).split("/", 1)
+    configured = None if options.onto or options.base else _fetch_pr_base()
+    if configured:
+        remote_branch, upstream = configured
+        base_remote = "origin"
+    else:
+        base_remote, remote_branch = output(
+            "rev-parse", "--abbrev-ref", "--symbolic-full-name", upstream
+        ).split("/", 1)
+    dependency = None
+    origin_head = None
+    if base_remote != "origin" and not output(
+        "ls-remote", "--heads", "origin", f"refs/heads/{remote_branch}"
+    ):
+        if gitlab:
+            fail(f"base branch '{remote_branch}' does not exist on origin")
+        if options.merge:
+            fail("cumulative PRs are drafts; omit the auto-merge option")
+
+        # Keep the dependency in the source history, but target upstream.
+        stacked_on = remote_branch
+        configured = _fetch_pr_base()
+        if configured:
+            remote_branch, _ = configured
+        else:
+            origin_head = remote_head("origin")
+            if origin_head is None:
+                fail("cannot determine the default branch of 'origin'")
+            remote_branch, _ = origin_head
+        if "--draft" not in pr_args:
+            pr_args.append("--draft")
+        print(
+            f"Creating a cumulative draft against origin/{remote_branch}; "
+            f"includes dependency '{stacked_on}'.",
+            file=sys.stderr,
+        )
+        dependency = (
+            f"Includes dependency `{stacked_on}` from `{base_remote}`. "
+            "This PR is cumulative until that dependency merges upstream."
+        )
+    if not gitlab:
+        github_args = _github_options(pr_args, origin_head)
     git("branch", "--no-track", branch, upstream)
-    fork = (
-        git("remote", "get-url", "mine", silent=True, check=False).returncode == 0
-    )
+    fork = git("remote", "get-url", "mine", silent=True, check=False).returncode == 0
     remote = "mine" if fork else "origin"
     with submission_checkout(branch, remote) as submission:
         path = submission.path
@@ -258,39 +388,13 @@ def submitpr(args):
             submission.created = True
             print(result.stdout, end="")
             return
-        body_args = ["--fill"]
-        template = path / ".github" / "pull_request_template.md"
-        if (
-            not fork
-            and os.environ.get("GIT_PILE_USE_PR_TEMPLATE")
-            and template.is_file()
-        ):
-            subject = output("show", "-s", "--format=%s", "HEAD", cwd=path)
-            body = output("show", "-s", "--format=%b", "HEAD", cwd=path)
-            body_args = [
-                "--title",
-                subject,
-                "--body",
-                (body + "\n\n" if body else "") + template.read_text().rstrip("\n"),
-            ]
-        if fork:
-            # The base may live on the fork rather than origin.
-            body_args = [
-                "--title",
-                output("show", "-s", "--format=%s", "HEAD", cwd=path),
-                "--body",
-                output("show", "-s", "--format=%b", "HEAD", cwd=path),
-                "--repo",
-                output("remote", "get-url", base_remote, cwd=path),
-            ]
         result = run(
             "gh",
             "pr",
             "create",
-            *body_args,
             "--base",
             remote_branch,
-            *pr_args,
+            *_github_args(github_args, remote, dependency, path),
             cwd=path,
             capture=True,
             check=False,

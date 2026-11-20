@@ -47,6 +47,21 @@ def branch_name(ref):
     return os.environ.get("GIT_PILE_PREFIX", "") + name
 
 
+def remote_head(remote):
+    branch = commit = None
+    for line in output("ls-remote", "--symref", remote, "HEAD").splitlines():
+        value, _, name = line.partition("\t")
+        if name != "HEAD":
+            continue
+        if value.startswith("ref: refs/heads/"):
+            branch = value.removeprefix("ref: refs/heads/")
+        else:
+            commit = value
+    if branch and commit:
+        return branch, commit
+    return None
+
+
 def worktree_path():
     # -z avoids Git's quoting of paths containing special characters.
     first = output("worktree", "list", "--porcelain", "-z").split("\0", 1)[0]

@@ -53,6 +53,16 @@ provided it still points to the pushed commit. Cleanup uses the remote
 that received the push, including `mine` for forks. Existing remote
 branches are never overwritten by `git submitpr`.
 
+Set `git config --local pile.prBase origin/IR` to submit against `IR`
+without changing your local branch's upstream. `--base` and `--onto`
+override this default.
+
+On GitHub, the [PR template][template] from `origin`'s default branch is
+appended to the commit message body. Use `--template FILE` to choose
+another template, or `--body` or `--body-file` to supply the entire body.
+
+[template]: https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/creating-a-pull-request-template-for-your-repository
+
 #### Options
 
 - You can pass a different sha for submitting a PR for an older commit
@@ -280,11 +290,6 @@ parallel, using up to four of its allocated build cores.
   you change this after using `git-pile` to create a PR, your PRs
   created before setting the prefix will not be updatable with the other
   commands.
-- Set `GIT_PILE_USE_PR_TEMPLATE` in your shell environment if you'd like
-  `git-pile` to attempt to prefill the description of your PR with the [PR
-  template][template] file if it exists.
-
-[template]: https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/creating-a-pull-request-template-for-your-repository
 
 ### GitLab support
 
@@ -358,6 +363,18 @@ GitHub will automatically re-target your second PR to the correct
 branch. Unfortunately it will leave the initial commit in the branch,
 which means you have to `git rebasepr` your second commit, to make
 GitHub correctly reflect the changes in the PR.
+
+When the dependency branch exists only on your fork, GitHub cannot use it
+as the base of an upstream PR. `git submitpr --onto SHA` instead creates a
+**cumulative draft** against `pile.prBase` (or `origin`'s default branch
+if unset): it includes the dependency commits and your new commit.
+`--base BRANCH` behaves the same way for fork-only branches. The target
+repository remains `origin`.
+Auto-merge options are rejected for these drafts.
+
+After the dependency merges upstream, rebase the cumulative branch to
+remove the dependency commits, update the PR, and mark it ready for review.
+This fallback is supported for GitHub, not GitLab.
 
 ## Under the hood
 
