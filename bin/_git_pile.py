@@ -130,16 +130,24 @@ class GitLabPage(HTMLParser):
             self.gitlab = attrs.get("content") == "GitLab"
 
 
-def gitlab_repository():
-    origin = output("remote", "get-url", "origin")
-    match = re.fullmatch(r"(?:[^@/:]+@)?([^/:]+):(?!//)(.+)", origin)
+def _web_remote(remote, *, cwd=None):
+    url = output("remote", "get-url", remote, cwd=cwd)
+    match = re.fullmatch(r"(?:[^@/:]+@)?([^/:]+):(?!//)(.+)", url)
     if match:
-        origin = f"https://{match[1]}/{match[2]}"
+        url = f"ssh://{match[1]}/{match[2]}"
+    parsed = urlsplit(url)
+    if parsed.scheme != "ssh":
+        return url
+    host = parsed.hostname
+    if host == "ssh.gitlab.gnome.org":
+        host = "gitlab.gnome.org"
+    return f"https://{host}{parsed.path}"
+
+
+def gitlab_repository():
+    origin = _web_remote("origin")
     parsed = urlsplit(origin)
-    if parsed.scheme == "ssh":
-        origin = f"https://{parsed.hostname}{parsed.path}"
-        parsed = urlsplit(origin)
-    if parsed.hostname == "gitlab.com":
+    if parsed.hostname in ("gitlab.com", "gitlab.gnome.org"):
         return True
     if parsed.hostname == "github.com" or parsed.scheme not in ("http", "https"):
         return False
@@ -361,14 +369,14 @@ def submitpr(args):
                 "--description",
                 output("show", "-s", "--format=%b", "HEAD", cwd=path),
                 "--repo",
-                output("remote", "get-url", "origin", cwd=path),
+                _web_remote("origin", cwd=path),
                 "--source-branch",
                 branch,
                 "--target-branch",
                 remote_branch,
             ]
             if fork:
-                create_args += ["--head", output("remote", "get-url", "mine", cwd=path)]
+                create_args += ["--head", _web_remote("mine", cwd=path)]
             if options.merge:
                 create_args += ["--auto-merge"]
                 if options.merge == "--squash":
@@ -522,7 +530,7 @@ def openpr(args):
             branch,
             "--web",
             "--repo",
-            output("remote", "get-url", "origin"),
+            _web_remote("origin"),
         )
         return
     url = run(
